@@ -151,7 +151,10 @@ void Update(void* context, double) {
         reset_requested = g_context.reset_requested;
         g_context.reset_requested = false;
     }
-    if (reset_requested) g_context.cursor.RequestReset();
+    if (reset_requested) {
+        g_context.engine.Reset();
+        g_context.cursor.RequestReset();
+    }
 
     std::uint32_t service_status = ANOMALY_STATUS_V1_UNAVAILABLE;
     std::uint64_t latest{};
