@@ -1,8 +1,8 @@
 # Anomaly 项目分析
 
-> 调研日期：2026-08-26（Asia/Shanghai）  
-> 调研对象：[`AnomalyNTE/Anomaly`](https://github.com/AnomalyNTE/Anomaly)  
-> 代码基线：[`0e1b59c02914e943a45885b40ee78ea1dcf8bd1e`](https://github.com/AnomalyNTE/Anomaly/tree/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e)，也是正式版本 [`v1.7.0`](https://github.com/AnomalyNTE/Anomaly/releases/tag/v1.7.0)  
+> 调研日期：2026-08-26（Asia/Shanghai）
+> 调研对象：[`AnomalyNTE/Anomaly`](https://github.com/AnomalyNTE/Anomaly)
+> 代码基线：[`0e1b59c02914e943a45885b40ee78ea1dcf8bd1e`](https://github.com/AnomalyNTE/Anomaly/tree/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e)，也是正式版本 [`v1.7.0`](https://github.com/AnomalyNTE/Anomaly/releases/tag/v1.7.0)
 > 来源范围：仅使用项目仓库 README、文档、源码、Manifest/CMake/CI 配置和 GitHub 官方 API。动态统计均为调研时快照。
 
 ## 结论先行

@@ -32,4 +32,3 @@ anomaly-test-host --plugin .\build\package\NteCombatStats --reload 10 --ticks 60
 ## 风险
 
 Anomaly 会加载到游戏进程。即使本插件只读，使用第三方工具仍可能违反游戏规则或带来崩溃、数据泄露和封号风险，请仅在自有测试环境中使用。
-
