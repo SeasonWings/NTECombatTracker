@@ -304,6 +304,24 @@ void CursorGapWaitsForLaterReplacementEncounter() {
           "pending cursor gap should survive until a later relevant event");
 }
 
+void WorldChangeDropsPendingQuality() {
+    CombatStatsEngine engine;
+    const TimePoint start{1000s};
+    const Handle first_world{130, 1};
+    const Handle next_world{140, 1};
+    const Handle player{131, 1};
+    engine.ObserveCombatant(Combatant{first_world, player, 100.0, 100.0, 0.0}, start);
+    engine.AcceptDamage(Outgoing(1, first_world, player, 10), start);
+    engine.Advance(start + 10s);
+    engine.MarkPartial(true);
+
+    engine.ObserveCombatant(Combatant{next_world, player, 100.0, 100.0, 0.0}, start + 11s);
+    engine.AcceptDamage(Outgoing(2, next_world, player, 20), start + 12s);
+    const auto snapshot = engine.BuildSnapshot(start + 12s);
+    Check(!snapshot.quality.partial && !snapshot.quality.cursor_gap,
+          "world change should discard pending quality from the previous world");
+}
+
 }  // namespace
 
 
@@ -318,6 +336,7 @@ int main() {
     CursorDefersResetAndRecoversRetainedWindow();
     CursorGapQualityAppliesToReplacementEncounter();
     CursorGapWaitsForLaterReplacementEncounter();
+    WorldChangeDropsPendingQuality();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return 1;

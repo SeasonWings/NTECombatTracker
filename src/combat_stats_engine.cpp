@@ -88,8 +88,7 @@ void SortRows(std::vector<AggregateRow>& rows) {
 
 void CombatStatsEngine::ObserveCombatant(const Combatant& combatant, TimePoint) {
     if (combatant_.world.id != 0 && combatant.world != combatant_.world) {
-        ClearEncounter();
-        controlled_characters_.clear();
+        Reset();
     }
     combatant_ = combatant;
     if (combatant.character.id != 0) controlled_characters_.insert(combatant.character);
