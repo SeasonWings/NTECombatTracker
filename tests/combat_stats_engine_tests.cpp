@@ -1,4 +1,5 @@
 #include "combat_stats_engine.hpp"
+#include "damage_cursor.hpp"
 
 #include <chrono>
 #include <iostream>
@@ -219,9 +220,9 @@ void AggregateLimitUsesOtherBucket() {
     Check(snapshot.outgoing_sources.size() == 256, "source rows should stay bounded with Other bucket");
     Check(snapshot.outgoing_targets.size() == 256, "target rows should stay bounded with Other bucket");
     if (!snapshot.outgoing_sources.empty()) {
-        Check(snapshot.outgoing_sources.back().label == "Other",
+        Check(snapshot.outgoing_sources.front().label == "Other",
               "overflow source row should be named Other");
-        Check(snapshot.outgoing_sources.back().damage == 2,
+        Check(snapshot.outgoing_sources.front().damage == 2,
               "overflow source damage should be retained");
     }
 }
@@ -241,6 +242,48 @@ void DamageTotalsSaturateOnOverflow() {
     Check(snapshot.quality.overflow, "local total overflow should set quality flag");
 }
 
+void CursorDefersResetAndRecoversRetainedWindow() {
+    nte::combat_stats::DamageCursor cursor;
+    static_cast<void>(cursor.Accept(40));
+    cursor.RequestReset();
+    const auto unavailable = cursor.BeginFrame(std::nullopt);
+    Check(!unavailable.reset_applied && cursor.reset_pending(),
+          "reset should remain pending while service is unavailable");
+    const auto reset = cursor.BeginFrame(55);
+    Check(reset.reset_applied && cursor.value() == 55,
+          "available service should reset cursor to latest sequence");
+    Check(!cursor.reset_pending(), "applied reset should clear pending state");
+
+    static_cast<void>(cursor.Accept(70));
+    const auto rewind = cursor.BeginFrame(10);
+    Check(rewind.cursor_gap && cursor.value() == 0,
+          "latest sequence rollback should rewind and report a gap");
+    static_cast<void>(cursor.Accept(5));
+    static_cast<void>(cursor.BeginFrame(20));
+    Check(cursor.RecoverFromNotFound(20) && cursor.value() == 0,
+          "stale retained-window cursor should recover once per frame");
+    Check(!cursor.RecoverFromNotFound(20), "cursor recovery should be bounded to one attempt");
+}
+
+void CursorGapQualityAppliesToReplacementEncounter() {
+    CombatStatsEngine engine;
+    nte::combat_stats::DamageCursor cursor;
+    const TimePoint start{800s};
+    const Handle world{110, 1};
+    const Handle player{111, 1};
+    engine.ObserveCombatant(Combatant{world, player, 100.0, 100.0, 0.0}, start);
+    engine.AcceptDamage(Outgoing(1, world, player, 10), start);
+    engine.Advance(start + 10s);
+    static_cast<void>(cursor.Accept(50));
+    const auto decision = cursor.BeginFrame(5);
+    engine.AcceptDamage(Outgoing(2, world, player, 20), start + 11s);
+    if (decision.cursor_gap) engine.MarkPartial(true);
+    const auto snapshot = engine.BuildSnapshot(start + 11s);
+    Check(snapshot.outgoing_damage == 20, "replacement encounter should start clean");
+    Check(snapshot.quality.partial && snapshot.quality.cursor_gap,
+          "cursor gap should apply after replacement encounter is created");
+}
+
 }  // namespace
 
 
@@ -252,6 +295,8 @@ int main() {
     AggregatesAndQualityFlags();
     AggregateLimitUsesOtherBucket();
     DamageTotalsSaturateOnOverflow();
+    CursorDefersResetAndRecoversRetainedWindow();
+    CursorGapQualityAppliesToReplacementEncounter();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return 1;

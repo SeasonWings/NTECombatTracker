@@ -11,7 +11,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(nte_combat_stats_engine STATIC
-    src/combat_stats_engine.cpp)
+    src/combat_stats_engine.cpp
+    src/damage_cursor.cpp)
 target_include_directories(nte_combat_stats_engine PUBLIC include)
 target_compile_definitions(nte_combat_stats_engine PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

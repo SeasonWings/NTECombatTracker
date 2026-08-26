@@ -1,4 +1,5 @@
 #include "combat_stats_engine.hpp"
+#include "damage_cursor.hpp"
 
 #include <anomaly/sdk/anomaly_sdk.h>
 #include <anomaly/sdk/cpp.hpp>
@@ -34,7 +35,7 @@ struct Context {
     const AnomalyHostApiV1* host{};
     const AnomalyUiServiceV1* ui{};
     CombatStatsEngine engine;
-    std::uint64_t cursor{};
+    nte::combat_stats::DamageCursor cursor;
     std::mutex mutex;
     RenderState render;
     bool reset_requested{};
@@ -131,7 +132,7 @@ const char* StatusName(const std::uint32_t status) noexcept {
 
 void ResetState() {
     g_context.engine.Reset();
-    g_context.cursor = 0;
+    g_context.cursor.Clear();
     std::scoped_lock lock(g_context.mutex);
     g_context.render = {};
     g_context.reset_requested = false;
@@ -144,34 +145,40 @@ void Update(void* context, double) {
     const auto combat = host.Query<AnomalyNteCombatServiceV1>(
         ANOMALY_NTE_COMBAT_SERVICE_V1_ID, ANOMALY_NTE_COMBAT_SERVICE_V1_VERSION);
 
-    bool reset{};
+    bool reset_requested{};
     {
         std::scoped_lock lock(g_context.mutex);
-        reset = g_context.reset_requested;
+        reset_requested = g_context.reset_requested;
         g_context.reset_requested = false;
     }
+    if (reset_requested) g_context.cursor.RequestReset();
 
     std::uint32_t service_status = ANOMALY_STATUS_V1_UNAVAILABLE;
     std::uint64_t latest{};
+    bool sampled_partial{};
+    bool sampled_overflow{};
+    bool cursor_gap{};
     if (CombatMethodsAvailable(combat.get())) {
         latest = combat->latest_damage_sequence(combat->user);
-        if (reset) {
+        const auto cursor_decision = g_context.cursor.BeginFrame(latest);
+        cursor_gap = cursor_decision.cursor_gap;
+        if (cursor_decision.reset_applied) {
             g_context.engine.Reset();
-            g_context.cursor = latest;
         }
 
         AnomalyNteCombatantSnapshotV1 combatant{sizeof(combatant)};
         const AnomalyStatusV1 status = combat->current_combatant(
             combat->user, &combatant);
         service_status = status.code;
-        if (status.code == ANOMALY_STATUS_V1_OK &&
+        const bool valid_combatant = status.code == ANOMALY_STATUS_V1_OK &&
             (combatant.flags & ANOMALY_NTE_COMBATANT_V1_VALID) != 0 &&
-            (combatant.flags & ANOMALY_NTE_COMBATANT_V1_STALE) == 0) {
+            (combatant.flags & ANOMALY_NTE_COMBATANT_V1_STALE) == 0;
+        if (valid_combatant) {
             g_context.engine.ObserveCombatant({
                 ConvertHandle(combatant.world), ConvertHandle(combatant.character),
                 combatant.hp, combatant.max_hp, combatant.shield}, now);
             if ((combatant.flags & ANOMALY_NTE_COMBATANT_V1_PARTIAL) != 0) {
-                g_context.engine.MarkPartial(false);
+                sampled_partial = true;
             }
             for (const std::uint32_t direction : {
                      ANOMALY_NTE_COMBAT_DIRECTION_V1_AS_ATTACKER,
@@ -184,63 +191,58 @@ void Update(void* context, double) {
                 if (combat->statistics(combat->user, &request, &statistics).code ==
                     ANOMALY_STATUS_V1_OK) {
                     if ((statistics.flags & ANOMALY_NTE_COMBAT_STATISTICS_V1_PARTIAL) != 0) {
-                        g_context.engine.MarkPartial(false);
+                        sampled_partial = true;
                     }
                     if ((statistics.flags & ANOMALY_NTE_COMBAT_STATISTICS_V1_OVERFLOW) != 0) {
-                        g_context.engine.MarkOverflow();
+                        sampled_overflow = true;
                     }
                 }
             }
         }
 
-        if (latest < g_context.cursor) {
-            g_context.cursor = 0;
-            g_context.engine.MarkPartial(true);
-        }
-        bool rebuilt{};
-        for (std::size_t count{}; count < kMaximumDrainPerUpdate; ++count) {
-            if (g_context.cursor == latest) break;
-            AnomalyNteDamageEventV1 event{sizeof(event)};
-            const AnomalyStatusV1 event_status = combat->next_damage_event(
-                combat->user, g_context.cursor, &event);
-            if (event_status.code == ANOMALY_STATUS_V1_OK) {
-                if (event.sequence <= g_context.cursor) {
-                    service_status = ANOMALY_STATUS_V1_FAILED;
-                    break;
-                }
-                g_context.cursor = event.sequence;
-                nte::combat_stats::DamageEvent normalized;
-                normalized.sequence = event.sequence;
-                normalized.world = ConvertHandle(event.world);
-                normalized.attacker = ConvertHandle(event.attacker);
-                normalized.victim = ConvertHandle(event.victim);
-                normalized.source_id = event.source_id;
-                normalized.final_damage = event.final_damage;
-                if (!g_context.engine.IsRelevant(
-                        normalized.world, normalized.attacker, normalized.victim)) {
+        if (valid_combatant) {
+            for (std::size_t count{}; count < kMaximumDrainPerUpdate; ++count) {
+                if (g_context.cursor.value() == latest) break;
+                AnomalyNteDamageEventV1 event{sizeof(event)};
+                const AnomalyStatusV1 event_status = combat->next_damage_event(
+                    combat->user, g_context.cursor.value(), &event);
+                if (event_status.code == ANOMALY_STATUS_V1_OK) {
+                    if (!g_context.cursor.Accept(event.sequence)) {
+                        service_status = ANOMALY_STATUS_V1_FAILED;
+                        break;
+                    }
+                    nte::combat_stats::DamageEvent normalized;
+                    normalized.sequence = event.sequence;
+                    normalized.world = ConvertHandle(event.world);
+                    normalized.attacker = ConvertHandle(event.attacker);
+                    normalized.victim = ConvertHandle(event.victim);
+                    normalized.source_id = event.source_id;
+                    normalized.final_damage = event.final_damage;
+                    if (!g_context.engine.IsRelevant(
+                            normalized.world, normalized.attacker, normalized.victim)) {
+                        continue;
+                    }
+                    normalized.source_name = ResolveSource(combat.get(), event.source_id);
+                    normalized.attacker_name = ResolveParticipant(combat.get(), event.attacker);
+                    normalized.victim_name = ResolveParticipant(combat.get(), event.victim);
+                    static_cast<void>(g_context.engine.AcceptDamage(normalized, now));
                     continue;
                 }
-                normalized.source_name = ResolveSource(combat.get(), event.source_id);
-                normalized.attacker_name = ResolveParticipant(combat.get(), event.attacker);
-                normalized.victim_name = ResolveParticipant(combat.get(), event.victim);
-                g_context.engine.AcceptDamage(normalized, now);
-                continue;
+                if (event_status.code == ANOMALY_STATUS_V1_NOT_FOUND &&
+                    g_context.cursor.RecoverFromNotFound(latest)) {
+                    cursor_gap = true;
+                    continue;
+                }
+                if (event_status.code != ANOMALY_STATUS_V1_NOT_FOUND) {
+                    service_status = event_status.code;
+                }
+                break;
             }
-            if (event_status.code == ANOMALY_STATUS_V1_NOT_FOUND &&
-                !rebuilt && g_context.cursor != 0 && latest > g_context.cursor) {
-                g_context.cursor = 0;
-                rebuilt = true;
-                g_context.engine.MarkPartial(true);
-                continue;
-            }
-            if (event_status.code != ANOMALY_STATUS_V1_NOT_FOUND) {
-                service_status = event_status.code;
-            }
-            break;
         }
-    } else if (reset) {
-        g_context.engine.Reset();
-        g_context.cursor = 0;
+        if (sampled_partial || cursor_gap) g_context.engine.MarkPartial(cursor_gap);
+        if (sampled_overflow) g_context.engine.MarkOverflow();
+    } else {
+        static_cast<void>(g_context.cursor.BeginFrame(std::nullopt));
     }
 
     g_context.engine.Advance(now);

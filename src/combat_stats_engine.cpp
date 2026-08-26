@@ -67,18 +67,21 @@ void AddBoundedAggregate(
 }
 
 template <typename Map>
-std::vector<AggregateRow> SortedRows(const Map& rows) {
+std::vector<AggregateRow> CopyRows(const Map& rows) {
     std::vector<AggregateRow> result;
     result.reserve(rows.size());
     for (const auto& [key, row] : rows) {
         static_cast<void>(key);
         result.push_back(row);
     }
-    std::ranges::sort(result, [](const AggregateRow& left, const AggregateRow& right) {
+    return result;
+}
+
+void SortRows(std::vector<AggregateRow>& rows) {
+    std::ranges::sort(rows, [](const AggregateRow& left, const AggregateRow& right) {
         if (left.damage != right.damage) return left.damage > right.damage;
         return left.label < right.label;
     });
-    return result;
 }
 
 }  // namespace
@@ -216,9 +219,9 @@ Snapshot CombatStatsEngine::BuildSnapshot(const TimePoint now) const {
     snapshot.maximum_outgoing_hit = maximum_outgoing_hit_;
     snapshot.recent_events = recent_events_;
     snapshot.quality = quality_;
-    snapshot.outgoing_sources = SortedRows(outgoing_sources_);
-    snapshot.outgoing_targets = SortedRows(outgoing_targets_);
-    snapshot.incoming_sources = SortedRows(incoming_sources_);
+    snapshot.outgoing_sources = CopyRows(outgoing_sources_);
+    snapshot.outgoing_targets = CopyRows(outgoing_targets_);
+    snapshot.incoming_sources = CopyRows(incoming_sources_);
     if (other_outgoing_source_.positive_hits != 0) {
         snapshot.outgoing_sources.push_back(other_outgoing_source_);
     }
@@ -228,6 +231,9 @@ Snapshot CombatStatsEngine::BuildSnapshot(const TimePoint now) const {
     if (other_incoming_source_.positive_hits != 0) {
         snapshot.incoming_sources.push_back(other_incoming_source_);
     }
+    SortRows(snapshot.outgoing_sources);
+    SortRows(snapshot.outgoing_targets);
+    SortRows(snapshot.incoming_sources);
     if (state_ != EncounterState::Idle) {
         const auto duration_end = state_ == EncounterState::Completed ? last_activity_ : now;
         snapshot.duration_seconds = std::chrono::duration<double>(
