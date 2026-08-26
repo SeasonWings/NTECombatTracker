@@ -12,7 +12,17 @@ cmake --build --preset release
 ctest --preset release
 ```
 
-插件包生成在 `build/package/NteCombatStats/`。部署前可执行：
+插件包生成在 `build/package/NteCombatStats/`，目录结构固定为：
+
+```text
+NteCombatStats/
+├── locales/
+│   └── zh-CN.json
+├── manifest.json
+└── plugin.dll
+```
+
+部署前可执行：
 
 ```powershell
 anomaly-plugin validate .\build\package\NteCombatStats

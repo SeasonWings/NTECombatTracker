@@ -53,11 +53,16 @@ if(NTE_COMBAT_STATS_BUILD_PLUGIN)
     endif()
     add_custom_command(TARGET nte_combat_stats POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${NTE_COMBAT_STATS_PACKAGE_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+                "${NTE_COMBAT_STATS_PACKAGE_DIR}/locales"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                 "$<TARGET_FILE:nte_combat_stats>"
                 "${NTE_COMBAT_STATS_PACKAGE_DIR}/plugin.dll"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                 "${CMAKE_CURRENT_SOURCE_DIR}/manifest.json"
                 "${NTE_COMBAT_STATS_PACKAGE_DIR}/manifest.json"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/locales/zh-CN.json"
+                "${NTE_COMBAT_STATS_PACKAGE_DIR}/locales/zh-CN.json"
         VERBATIM)
 endif()

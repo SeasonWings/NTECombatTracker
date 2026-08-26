@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "locale": "zh-CN",
+  "messages": {
+    "plugin.name": "NTE 战斗统计",
+    "plugin.description": "只读的当前会话伤害、DPS、来源与参与者统计。"
+  }
+}
