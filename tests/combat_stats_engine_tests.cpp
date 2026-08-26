@@ -216,12 +216,12 @@ void AggregateLimitUsesOtherBucket() {
     }
     const auto snapshot = engine.BuildSnapshot(start);
     Check(snapshot.quality.aggregate_truncated, "aggregate limit should set quality flag");
-    Check(snapshot.outgoing_sources.size() == 257, "source rows should include Other bucket");
-    Check(snapshot.outgoing_targets.size() == 257, "target rows should include Other bucket");
+    Check(snapshot.outgoing_sources.size() == 256, "source rows should stay bounded with Other bucket");
+    Check(snapshot.outgoing_targets.size() == 256, "target rows should stay bounded with Other bucket");
     if (!snapshot.outgoing_sources.empty()) {
         Check(snapshot.outgoing_sources.back().label == "Other",
               "overflow source row should be named Other");
-        Check(snapshot.outgoing_sources.back().damage == 1,
+        Check(snapshot.outgoing_sources.back().damage == 2,
               "overflow source damage should be retained");
     }
 }

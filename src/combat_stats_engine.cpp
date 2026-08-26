@@ -57,7 +57,8 @@ void AddBoundedAggregate(
         overflow = AddAggregate(found->second, label, damage) || overflow;
         return;
     }
-    if (rows.size() < 256) {
+    // Reserve the 256th visible key for the catch-all Other bucket.
+    if (rows.size() < 255) {
         overflow = AddAggregate(rows[key], label, damage) || overflow;
         return;
     }
