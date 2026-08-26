@@ -50,4 +50,3 @@ bool DamageCursor::reset_pending() const noexcept {
 }
 
 }  // namespace nte::combat_stats
-

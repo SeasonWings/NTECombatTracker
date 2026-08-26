@@ -29,4 +29,3 @@ private:
 };
 
 }  // namespace nte::combat_stats
-
