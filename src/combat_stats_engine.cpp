@@ -114,6 +114,11 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
     if (state_ == EncounterState::Idle) {
         state_ = EncounterState::Active;
         encounter_started_ = now;
+        quality_.partial = pending_quality_.partial;
+        quality_.overflow = pending_quality_.overflow;
+        quality_.cursor_gap = pending_quality_.cursor_gap;
+        quality_.aggregate_truncated = pending_quality_.aggregate_truncated;
+        pending_quality_ = {};
     }
     last_activity_ = now;
     if (event.final_damage > 0) {
@@ -198,13 +203,19 @@ void CombatStatsEngine::Reset() {
     ClearEncounter();
     combatant_ = {};
     controlled_characters_.clear();
+    pending_quality_ = {};
 }
 void CombatStatsEngine::MarkPartial(const bool cursor_gap) {
     quality_.partial = true;
     quality_.cursor_gap = quality_.cursor_gap || cursor_gap;
+    if (state_ != EncounterState::Active) {
+        pending_quality_.partial = true;
+        pending_quality_.cursor_gap = pending_quality_.cursor_gap || cursor_gap;
+    }
 }
 void CombatStatsEngine::MarkOverflow() {
     quality_.overflow = true;
+    if (state_ != EncounterState::Active) pending_quality_.overflow = true;
 }
 
 Snapshot CombatStatsEngine::BuildSnapshot(const TimePoint now) const {

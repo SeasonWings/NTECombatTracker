@@ -284,6 +284,26 @@ void CursorGapQualityAppliesToReplacementEncounter() {
           "cursor gap should apply after replacement encounter is created");
 }
 
+void CursorGapWaitsForLaterReplacementEncounter() {
+    CombatStatsEngine engine;
+    const TimePoint start{900s};
+    const Handle world{120, 1};
+    const Handle player{121, 1};
+    engine.ObserveCombatant(Combatant{world, player, 100.0, 100.0, 0.0}, start);
+    engine.AcceptDamage(Outgoing(1, world, player, 10), start);
+    engine.Advance(start + 10s);
+    engine.MarkPartial(true);
+    auto snapshot = engine.BuildSnapshot(start + 10s);
+    Check(snapshot.quality.cursor_gap, "completed encounter should show detected cursor gap");
+
+    engine.Advance(start + 11s);
+    engine.AcceptDamage(Outgoing(2, world, player, 20), start + 12s);
+    snapshot = engine.BuildSnapshot(start + 12s);
+    Check(snapshot.outgoing_damage == 20, "later replacement encounter should start clean");
+    Check(snapshot.quality.partial && snapshot.quality.cursor_gap,
+          "pending cursor gap should survive until a later relevant event");
+}
+
 }  // namespace
 
 
@@ -297,6 +317,7 @@ int main() {
     DamageTotalsSaturateOnOverflow();
     CursorDefersResetAndRecoversRetainedWindow();
     CursorGapQualityAppliesToReplacementEncounter();
+    CursorGapWaitsForLaterReplacementEncounter();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return 1;

@@ -143,6 +143,7 @@ private:
     AggregateRow other_outgoing_target_;
     AggregateRow other_incoming_source_;
     Quality quality_;
+    Quality pending_quality_;
 };
 
 }  // namespace nte::combat_stats
