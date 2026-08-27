@@ -84,6 +84,21 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
         close.missing_sequence_ranges.emplace_back(92, 94);
         close.open_missing_sequence_start = 95;
         close.service_intervals_truncated = true;
+        nte::combat_stats::PlayerRow player;
+        player.handle = event.attacker;
+        player.object_path = event.attacker_name;
+        player.label = "Actor/A";
+        player.damage = 100;
+        player.positive_hits = 1;
+        player.critical_hits = 1;
+        player.maximum_hit = 100;
+        player.maximum_source_id = event.source_id;
+        player.maximum_source_name = event.source_name;
+        player.damage_share = 100.0;
+        player.encounter_dps = 10.0;
+        player.active_dps = 100.0;
+        player.rolling_dps = 10.0;
+        close.confirmed_controlled_players.push_back(player);
         Check(repository.EndEncounter(close, error),
               "encounter should close");
         Check(repository.CloseReport(ReportClose{
@@ -122,6 +137,11 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
           "encounter summary should contain all participant aggregate dimensions");
     Check(encounters.find("\"critical_hits\":\"1\"") != std::string::npos,
           "encounter aggregates should retain critical hit counts");
+    Check(encounters.find("\"confirmed_controlled_players\":[{\"actor_id\":1") !=
+              std::string::npos &&
+          encounters.find("\"maximum_ability_id\":1") != std::string::npos &&
+          encounters.find("\"damage_share\":100") != std::string::npos,
+          "encounter summary should persist report-local controlled player and ability ids");
     Check(encounters.find("\"service_unavailable_intervals\":[{\"start_offset_us\":\"3000000\"") !=
               std::string::npos && encounters.find("\"complete\":false") != std::string::npos,
           "service gaps should be persisted and make the encounter incomplete");

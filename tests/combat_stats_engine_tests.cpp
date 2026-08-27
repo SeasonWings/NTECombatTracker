@@ -159,7 +159,73 @@ void EncounterLifecycleAndCharacterRotation() {
     snapshot = engine.BuildSnapshot(start + 13s);
     Check(snapshot.state == EncounterState::Idle, "world change should reset encounter");
     Check(snapshot.outgoing_damage == 0, "world change should clear totals");
-    Check(snapshot.controlled_character_count == 1, "world change should rebuild controlled set");
+    Check(snapshot.controlled_character_count == 0,
+          "world change should wait for actual encounter participation");
+}
+
+void ObservedCharactersRequireEncounterParticipation() {
+    CombatStatsEngine engine;
+    const TimePoint start{250s};
+    const Handle world{21, 1};
+    const Handle participating{22, 1};
+    const Handle observed_only{23, 1};
+    engine.ObserveCombatant(Combatant{world, participating, 100.0, 100.0, 0.0}, start);
+    engine.ObserveCombatant(Combatant{world, observed_only, 100.0, 100.0, 0.0}, start);
+
+    auto hit = Outgoing(1, world, participating, 120);
+    hit.attacker_name = "/Game/Player/player_001_C";
+    Check(engine.AcceptDamage(hit, start), "participating controlled character should start encounter");
+
+    const auto snapshot = engine.BuildSnapshot(start);
+    Check(snapshot.controlled_character_count == 1,
+          "observed characters without encounter events must not be counted");
+    Check(snapshot.players.size() == 1,
+          "only confirmed controlled characters should produce player rows");
+}
+
+void ConfirmedCharactersMergeGenerationByResolvedPath() {
+    CombatStatsEngine engine;
+    const TimePoint start{275s};
+    const Handle world{24, 1};
+    const Handle first_generation{25, 1};
+    const Handle second_generation{25, 2};
+    engine.ObserveCombatant(
+        Combatant{world, first_generation, 100.0, 100.0, 0.0}, start);
+
+    auto first = Outgoing(1, world, first_generation, 100);
+    first.attacker_name = "/Game/Player/player_076_shinku_C";
+    first.source_id = 501;
+    first.source_name = "SkillA";
+    first.flags = (1u << 1u) | (1u << 2u);
+    engine.AcceptDamage(first, start);
+
+    engine.ObserveCombatant(
+        Combatant{world, second_generation, 100.0, 100.0, 0.0}, start + 2s);
+    auto second = Outgoing(2, world, second_generation, 300);
+    second.attacker_name = first.attacker_name;
+    second.source_id = 502;
+    second.source_name = "SkillB";
+    second.flags = (1u << 1u) | (1u << 3u);
+    engine.AcceptDamage(second, start + 2s);
+
+    const auto snapshot = engine.BuildSnapshot(start + 2s);
+    Check(snapshot.controlled_character_count == 1,
+          "same resolved character path should merge generation handles");
+    Check(snapshot.players.size() == 1, "merged character should have one player row");
+    if (snapshot.players.size() == 1) {
+        const auto& row = snapshot.players.front();
+        Check(row.damage == 400 && row.positive_hits == 2,
+              "player row should aggregate positive damage and hits");
+        Check(row.critical_hits == 2 && row.head_hits == 1 && row.weak_hits == 1,
+              "player row should aggregate NTE hit flags");
+        Check(row.maximum_hit == 300 && row.maximum_source_id == 502 &&
+                  row.maximum_source_name == "SkillB",
+              "player row should retain maximum hit ability");
+        Check(row.encounter_dps == 200.0 && row.active_dps == 200.0,
+              "player row should expose encounter and active DPS");
+        Check(row.damage_share == 100.0,
+              "single player should own one hundred percent of outgoing damage");
+    }
 }
 
 void DirectionAndNonPositiveRules() {
@@ -402,6 +468,8 @@ int main() {
     RelevantDamageStartsEncounter();
     ActiveEncounterCapturesEveryVisibleDamageField();
     EncounterLifecycleAndCharacterRotation();
+    ObservedCharactersRequireEncounterParticipation();
+    ConfirmedCharactersMergeGenerationByResolvedPath();
     DirectionAndNonPositiveRules();
     EncounterAndRollingDps();
     EncounterDpsUsesPlayerActivityWindow();

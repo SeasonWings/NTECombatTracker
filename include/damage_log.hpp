@@ -20,7 +20,7 @@ struct ReportOpen {
     combat_stats::Handle world;
     std::int64_t started_utc_ms{};
     std::string game_build;
-    std::string plugin_version{"0.2.0"};
+    std::string plugin_version{"0.3.0"};
     std::string runtime_version;
 };
 
@@ -56,6 +56,7 @@ struct EncounterClose {
     std::optional<std::uint64_t> open_missing_sequence_start;
     bool service_intervals_truncated{};
     bool missing_ranges_truncated{};
+    std::vector<combat_stats::PlayerRow> confirmed_controlled_players;
 };
 
 struct ReportClose {

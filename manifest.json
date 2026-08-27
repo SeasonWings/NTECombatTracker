@@ -5,7 +5,7 @@
   "description": "只读的实时伤害统计与高保真本地 JSONL 战斗日志。",
   "author": "Shikari",
   "license": "AGPL-3.0-only",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "entry": "plugin.dll",
   "api": {"major": 1, "minMinor": 0, "maxMinor": 0},
   "games": ["nte"],
@@ -16,7 +16,8 @@
     {"id": "anomaly.json", "minVersion": 1},
     {"id": "anomaly.runtime-info", "minVersion": 1, "optional": true},
     {"id": "anomaly.nte.build", "minVersion": 1, "optional": true},
-    {"id": "anomaly.nte.combat", "minVersion": 1, "optional": true}
+    {"id": "anomaly.nte.combat", "minVersion": 1, "optional": true},
+    {"id": "anomaly.websocket", "minVersion": 1, "optional": true}
   ],
-  "capabilities": ["ui", "json", "runtime-info", "nte-build", "nte-combat-read"]
+  "capabilities": ["ui", "json", "runtime-info", "nte-build", "nte-combat-read", "websocket"]
 }

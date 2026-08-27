@@ -1,0 +1,41 @@
+#pragma once
+
+#include "combat_stats_engine.hpp"
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+
+namespace nte::combat_stats {
+
+inline constexpr std::string_view kOverlayChannel =
+    "local.nte.combat-stats.overlay";
+inline constexpr std::uint32_t kOverlaySchemaVersion = 1;
+inline constexpr std::uint32_t kMetricVersion = 1;
+inline constexpr std::size_t kMaximumOverlayMessageBytes = 64U * 1024U;
+
+struct NteOverlaySnapshot {
+    std::string producer_instance_id;
+    std::uint64_t snapshot_sequence{};
+    std::uint64_t latest_damage_sequence{};
+    std::int64_t sent_utc_ms{};
+    bool producer_stopping{};
+    bool capture_available{};
+    std::string capture_status;
+    std::string report_id;
+    std::string encounter_id;
+    std::string primary_target;
+    std::uint16_t websocket_port{};
+    std::uint32_t connected_clients{};
+    std::uint64_t published_messages{};
+    std::uint64_t transport_dropped_messages{};
+    Snapshot combat;
+};
+
+[[nodiscard]] std::string SerializeOverlaySnapshot(const NteOverlaySnapshot& snapshot);
+[[nodiscard]] std::optional<NteOverlaySnapshot> ParseOverlaySnapshot(
+    std::string_view json,
+    std::string& error);
+
+}  // namespace nte::combat_stats

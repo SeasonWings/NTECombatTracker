@@ -925,6 +925,25 @@ bool DamageLogRepository::EndEncounter(
         !encounter.service_intervals_truncated && !encounter.missing_ranges_truncated;
     const auto encounter_duration_us = static_cast<std::uint64_t>(
         (std::max)(0.0, duration) * 1'000'000.0);
+    struct ControlledPlayerIds {
+        const combat_stats::PlayerRow* player{};
+        std::uint32_t actor_id{};
+        std::uint32_t maximum_ability_id{};
+    };
+    std::vector<ControlledPlayerIds> controlled_players;
+    controlled_players.reserve(encounter.confirmed_controlled_players.size());
+    for (const auto& player : encounter.confirmed_controlled_players) {
+        const std::string path = player.object_path.empty() ? player.label : player.object_path;
+        const std::uint32_t actor_id = impl_->ActorId(player.handle, path, error);
+        if (actor_id == 0 && !error.empty()) return false;
+        std::uint32_t ability_id{};
+        if (player.maximum_source_id != 0) {
+            ability_id = impl_->AbilityId(player.maximum_source_id,
+                player.maximum_source_name, error);
+            if (ability_id == 0 && !error.empty()) return false;
+        }
+        controlled_players.push_back({&player, actor_id, ability_id});
+    }
     std::ostringstream line;
     line << "{\"schema_version\":1,\"metric_version\":1"
          << ",\"encounter_id\":" << Quoted(encounter.encounter_id)
@@ -965,6 +984,26 @@ bool DamageLogRepository::EndEncounter(
     } else {
         line << "null";
     }
+    line << ",\"confirmed_controlled_players\":[";
+    for (std::size_t index{}; index < controlled_players.size(); ++index) {
+        if (index != 0) line << ',';
+        const auto& ids = controlled_players[index];
+        const auto& player = *ids.player;
+        line << "{\"actor_id\":" << ids.actor_id
+             << ",\"label\":" << Quoted(player.label)
+             << ",\"damage\":" << Decimal(player.damage)
+             << ",\"positive_hits\":" << Decimal(player.positive_hits)
+             << ",\"critical_hits\":" << Decimal(player.critical_hits)
+             << ",\"head_hits\":" << Decimal(player.head_hits)
+             << ",\"weak_hits\":" << Decimal(player.weak_hits)
+             << ",\"damage_share\":" << JsonNumber(player.damage_share)
+             << ",\"encounter_dps\":" << JsonNumber(player.encounter_dps)
+             << ",\"active_dps\":" << JsonNumber(player.active_dps)
+             << ",\"rolling_dps_10s\":" << JsonNumber(player.rolling_dps)
+             << ",\"maximum_hit\":" << Decimal(player.maximum_hit)
+             << ",\"maximum_ability_id\":" << ids.maximum_ability_id << '}';
+    }
+    line << ']';
     line
          << ",\"complete\":" << (complete ? "true" : "false")
          << ",\"quality\":{\"partial\":" << (encounter.quality.partial ? "true" : "false")

@@ -84,6 +84,33 @@ void SortRows(std::vector<AggregateRow>& rows) {
     });
 }
 
+bool IsResolvedParticipant(const std::string& value) {
+    return !value.empty() && !value.starts_with("Unknown");
+}
+
+std::string ParticipantLabel(const std::string& path, const Handle handle) {
+    if (IsResolvedParticipant(path)) {
+        const std::size_t slash = path.find_last_of("/\\");
+        const std::size_t dot = path.find_last_of('.');
+        const std::size_t position = slash == std::string::npos
+            ? dot
+            : (dot == std::string::npos ? slash : (std::max)(slash, dot));
+        if (position != std::string::npos && position + 1 < path.size()) {
+            return path.substr(position + 1);
+        }
+        return path;
+    }
+    return "Actor " + std::to_string(handle.id) + ':' + std::to_string(handle.generation);
+}
+
+std::string HandleIdentity(const Handle handle) {
+    return "handle:" + std::to_string(handle.id) + ':' + std::to_string(handle.generation);
+}
+
+std::string PathIdentity(const std::string& path) {
+    return "path:" + path;
+}
+
 }  // namespace
 
 void CombatStatsEngine::ObserveCombatant(const Combatant& combatant, TimePoint) {
@@ -102,6 +129,69 @@ bool CombatStatsEngine::IsRelevant(
         (controlled_characters_.contains(attacker) || controlled_characters_.contains(victim));
 }
 
+CombatStatsEngine::PlayerAggregate& CombatStatsEngine::ConfirmControlledActor(
+    const Handle handle,
+    const std::string& object_path) {
+    const bool resolved = IsResolvedParticipant(object_path);
+    const std::string identity = resolved ? PathIdentity(object_path) : HandleIdentity(handle);
+    if (resolved) {
+        const auto previous_key = confirmed_actor_keys_.find(handle);
+        if (previous_key != confirmed_actor_keys_.end() && previous_key->second != identity) {
+            auto previous = confirmed_controlled_actors_.extract(previous_key->second);
+            if (!previous.empty()) {
+                if (auto found = confirmed_controlled_actors_.find(identity);
+                    found == confirmed_controlled_actors_.end()) {
+                    previous.key() = identity;
+                    previous.mapped().object_path = object_path;
+                    previous.mapped().label = ParticipantLabel(object_path, handle);
+                    confirmed_controlled_actors_.insert(std::move(previous));
+                } else {
+                    PlayerAggregate& destination = found->second;
+                    PlayerAggregate& source = previous.mapped();
+                    quality_.overflow = SaturatingAdd(destination.damage, source.damage) ||
+                        quality_.overflow;
+                    const auto add_count = [this](std::uint64_t& destination_count,
+                                               const std::uint64_t source_count) {
+                        if (source_count > std::numeric_limits<std::uint64_t>::max() -
+                                destination_count) {
+                            destination_count = std::numeric_limits<std::uint64_t>::max();
+                            quality_.overflow = true;
+                        } else {
+                            destination_count += source_count;
+                        }
+                    };
+                    add_count(destination.positive_hits, source.positive_hits);
+                    add_count(destination.critical_hits, source.critical_hits);
+                    add_count(destination.head_hits, source.head_hits);
+                    add_count(destination.weak_hits, source.weak_hits);
+                    if (source.maximum_hit > destination.maximum_hit) {
+                        destination.maximum_hit = source.maximum_hit;
+                        destination.maximum_source_id = source.maximum_source_id;
+                        destination.maximum_source_name = std::move(source.maximum_source_name);
+                    }
+                    if (destination.first_positive_damage == TimePoint{} ||
+                        (source.first_positive_damage != TimePoint{} &&
+                         source.first_positive_damage < destination.first_positive_damage)) {
+                        destination.first_positive_damage = source.first_positive_damage;
+                    }
+                    destination.last_positive_damage = (std::max)(
+                        destination.last_positive_damage, source.last_positive_damage);
+                    destination.rolling_damage.insert(destination.rolling_damage.end(),
+                        source.rolling_damage.begin(), source.rolling_damage.end());
+                }
+            }
+        }
+    }
+    confirmed_actor_keys_.insert_or_assign(handle, identity);
+    PlayerAggregate& aggregate = confirmed_controlled_actors_[identity];
+    aggregate.handle = handle;
+    if (resolved) aggregate.object_path = object_path;
+    if (aggregate.label.empty() || resolved) {
+        aggregate.label = ParticipantLabel(aggregate.object_path, handle);
+    }
+    return aggregate;
+}
+
 bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint now) {
     if (event.world != combatant_.world) return false;
     const bool relevant = IsRelevant(event.world, event.attacker, event.victim);
@@ -117,6 +207,13 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
         quality_.cursor_gap = pending_quality_.cursor_gap;
         quality_.aggregate_truncated = pending_quality_.aggregate_truncated;
         pending_quality_ = {};
+    }
+    PlayerAggregate* outgoing_player{};
+    if (outgoing) {
+        outgoing_player = &ConfirmControlledActor(event.attacker, event.attacker_name);
+    }
+    if (incoming) {
+        static_cast<void>(ConfirmControlledActor(event.victim, event.victim_name));
     }
     if (relevant) last_activity_ = now;
     if (event.final_damage > 0) {
@@ -137,6 +234,34 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
                 outgoing_targets_, event.victim, event.victim_name,
                 event.final_damage, other_outgoing_target_, quality_.aggregate_truncated,
                 quality_.overflow);
+            if (outgoing_player != nullptr) {
+                quality_.overflow = SaturatingAdd(
+                    outgoing_player->damage, event.final_damage) || quality_.overflow;
+                quality_.overflow = SaturatingIncrement(outgoing_player->positive_hits) ||
+                    quality_.overflow;
+                if ((event.flags & (1u << 1u)) != 0) {
+                    quality_.overflow = SaturatingIncrement(outgoing_player->critical_hits) ||
+                        quality_.overflow;
+                }
+                if ((event.flags & (1u << 2u)) != 0) {
+                    quality_.overflow = SaturatingIncrement(outgoing_player->head_hits) ||
+                        quality_.overflow;
+                }
+                if ((event.flags & (1u << 3u)) != 0) {
+                    quality_.overflow = SaturatingIncrement(outgoing_player->weak_hits) ||
+                        quality_.overflow;
+                }
+                if (event.final_damage > outgoing_player->maximum_hit) {
+                    outgoing_player->maximum_hit = event.final_damage;
+                    outgoing_player->maximum_source_id = event.source_id;
+                    outgoing_player->maximum_source_name = event.source_name;
+                }
+                if (outgoing_player->first_positive_damage == TimePoint{}) {
+                    outgoing_player->first_positive_damage = now;
+                }
+                outgoing_player->last_positive_damage = now;
+                outgoing_player->rolling_damage.push_back({now, event.final_damage});
+            }
         }
         if (incoming) {
             quality_.overflow = SaturatingAdd(incoming_damage_, event.final_damage) ||
@@ -203,6 +328,8 @@ void CombatStatsEngine::ClearEncounter() {
     outgoing_sources_.clear();
     outgoing_targets_.clear();
     incoming_sources_.clear();
+    confirmed_controlled_actors_.clear();
+    confirmed_actor_keys_.clear();
     other_outgoing_source_ = {};
     other_outgoing_target_ = {};
     other_incoming_source_ = {};
@@ -231,7 +358,7 @@ void CombatStatsEngine::MarkOverflow() {
 Snapshot CombatStatsEngine::BuildSnapshot(const TimePoint now) const {
     Snapshot snapshot;
     snapshot.state = state_;
-    snapshot.controlled_character_count = controlled_characters_.size();
+    snapshot.controlled_character_count = confirmed_controlled_actors_.size();
     snapshot.outgoing_damage = outgoing_damage_;
     snapshot.incoming_damage = incoming_damage_;
     snapshot.outgoing_positive_hits = outgoing_positive_hits_;
@@ -278,6 +405,52 @@ Snapshot CombatStatsEngine::BuildSnapshot(const TimePoint now) const {
             std::chrono::duration<double>(now - rolling_start).count()));
         snapshot.rolling_dps = static_cast<double>(rolling_damage) / seconds;
     }
+    const double encounter_seconds = (std::max)(1.0,
+        std::chrono::duration<double>(last_activity_ - encounter_started_).count());
+    snapshot.players.reserve(confirmed_controlled_actors_.size());
+    for (const auto& [identity, aggregate] : confirmed_controlled_actors_) {
+        PlayerRow row;
+        row.identity_key = identity;
+        row.handle = aggregate.handle;
+        row.object_path = aggregate.object_path;
+        row.label = aggregate.label;
+        row.damage = aggregate.damage;
+        row.positive_hits = aggregate.positive_hits;
+        row.critical_hits = aggregate.critical_hits;
+        row.head_hits = aggregate.head_hits;
+        row.weak_hits = aggregate.weak_hits;
+        row.maximum_hit = aggregate.maximum_hit;
+        row.maximum_source_id = aggregate.maximum_source_id;
+        row.maximum_source_name = aggregate.maximum_source_name;
+        row.damage_share = outgoing_damage_ > 0
+            ? static_cast<double>(aggregate.damage) * 100.0 /
+                static_cast<double>(outgoing_damage_)
+            : 0.0;
+        row.encounter_dps = static_cast<double>(aggregate.damage) / encounter_seconds;
+        if (aggregate.positive_hits != 0) {
+            const double active_seconds = (std::max)(1.0, std::chrono::duration<double>(
+                aggregate.last_positive_damage - aggregate.first_positive_damage).count());
+            row.active_dps = static_cast<double>(aggregate.damage) / active_seconds;
+        }
+        long double player_rolling_damage{};
+        TimePoint player_rolling_start = now;
+        for (const TimedDamage& item : aggregate.rolling_damage) {
+            if (now - item.time < std::chrono::seconds(10)) {
+                player_rolling_damage += item.damage;
+                player_rolling_start = (std::min)(player_rolling_start, item.time);
+            }
+        }
+        if (player_rolling_damage > 0) {
+            const double rolling_seconds = (std::max)(1.0, (std::min)(10.0,
+                std::chrono::duration<double>(now - player_rolling_start).count()));
+            row.rolling_dps = static_cast<double>(player_rolling_damage) / rolling_seconds;
+        }
+        snapshot.players.push_back(std::move(row));
+    }
+    std::ranges::sort(snapshot.players, [](const PlayerRow& left, const PlayerRow& right) {
+        if (left.damage != right.damage) return left.damage > right.damage;
+        return left.label < right.label;
+    });
     snapshot.hp = combatant_.hp;
     snapshot.max_hp = combatant_.max_hp;
     snapshot.shield = combatant_.shield;

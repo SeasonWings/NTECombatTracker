@@ -1,6 +1,6 @@
 # NTE Combat Stats
 
-Anomaly v1.7.0 的只读游戏内战斗统计与本地日志插件。它消费 `anomaly.nte.combat`，显示当前玩家队伍轮换期间的输出、承伤、遭遇 DPS、10 秒 DPS、伤害来源、参与者和最近事件，并将遭遇内宿主可见的完整伤害事件保存为可重放 JSON Lines。
+Anomaly v1.7.0 的只读游戏内战斗统计、本地日志和纯 Win32 Overlay 插件。它消费 `anomaly.nte.combat`，显示当前玩家队伍轮换期间的输出、承伤、遭遇 DPS、10 秒 DPS、伤害来源、参与者和最近事件，并将遭遇内宿主可见的完整伤害事件保存为可重放 JSON Lines。
 
 ## 构建
 
@@ -12,12 +12,13 @@ cmake --build --preset release
 ctest --preset release
 ```
 
-插件包生成在 `build/package/NteCombatStats/`，目录结构固定为：
+插件包生成在 `build/package/NteCombatStats/`，同时生成 ZIP。ZIP 内不额外嵌套目录，结构固定为：
 
 ```text
-NteCombatStats/
 ├── locales/
 │   └── zh-CN.json
+├── NteCombatOverlay.exe
+├── THIRD_PARTY_NOTICES.txt
 ├── manifest.json
 └── plugin.dll
 ```
@@ -34,10 +35,20 @@ anomaly-test-host --plugin .\build\package\NteCombatStats --reload 10 --ticks 60
 ## 统计语义
 
 - 第一条当前受控角色相关事件开启遭遇战，10 秒无相关伤害后结束。
-- 同一 World 内切换角色不会重置；切换 World 会清空。
+- 同一 World 内切换角色不会重置；切换 World 会清空。只有实际作为攻击者或受击者出现的受控角色才计为参战角色，同一路径的 generation 变化会合并。
 - 只有正 `final_damage` 进入伤害总量和 DPS；零值与负值保留在事件日志。
 - 数据来自客户端 `CharacterOnDamaged` 广播，不是服务端权威战斗日志。
-- 插件严格只读，不申请内存读写、技能调用或网络能力。
+- 插件严格只读，不申请内存读写、技能调用或外部网络能力。本地 Overlay 只连接 Runtime 的 `127.0.0.1` WebSocket 广播。
+
+## Win32 Overlay
+
+插件从自身包目录自动启动 `NteCombatOverlay.exe`。Overlay 默认 520×220、透明置顶，按角色显示伤害、占比、遭遇 DPS、暴击率和最大一击；右键可选择爆头率、弱点率、活跃 DPS、10 秒 DPS、透明度、缩放、置顶和离战隐藏。
+
+- 点击列头切换排序；拖动顶栏移动，右下角缩放。
+- `Ctrl+Shift+F12` 切换锁定。锁定后窗口不激活并允许鼠标穿透。
+- 托盘菜单可显示、隐藏、解锁和退出。
+- 配置保存在 `%LOCALAPPDATA%\NTECombatStats\overlay-settings.json`。
+- Overlay 只接收自有 `NteOverlaySnapshot`，不使用 ACT `CombatData`、OverlayPlugin、CEF 或 WebView2。
 
 ## 本地日志
 

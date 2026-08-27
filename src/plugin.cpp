@@ -1,6 +1,8 @@
 #include "combat_stats_engine.hpp"
 #include "damage_cursor.hpp"
 #include "log_worker.hpp"
+#include "overlay_publish_policy.hpp"
+#include "overlay_protocol.hpp"
 
 #include <anomaly/sdk/anomaly_sdk.h>
 #include <anomaly/sdk/cpp.hpp>
@@ -23,6 +25,8 @@
 #include <utility>
 #include <vector>
 
+#include <windows.h>
+
 namespace {
 
 using nte::combat_stats::AggregateRow;
@@ -32,6 +36,7 @@ using nte::combat_stats::EventDirection;
 using nte::combat_stats::Handle;
 using nte::combat_stats::Snapshot;
 using nte::combat_stats::TimePoint;
+using nte::combat_stats::NteOverlaySnapshot;
 
 constexpr std::size_t kMaximumDrainPerUpdate = 256;
 constexpr std::size_t kMaximumResolvedNameBytes = 4096;
@@ -53,6 +58,11 @@ struct RenderState {
     std::string log_root;
     std::string report_id;
     std::string encounter_id;
+    std::uint16_t websocket_port{};
+    std::uint32_t overlay_clients{};
+    std::uint64_t overlay_published{};
+    std::uint64_t overlay_dropped{};
+    std::string overlay_error;
 };
 
 struct LogSession {
@@ -95,6 +105,16 @@ struct Context {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> pending_missing_sequence_ranges;
     bool pending_missing_ranges_truncated{};
     std::unordered_set<std::string> expanded_reports;
+    const AnomalyWebSocketServiceV1* websocket{};
+    const AnomalyCoreServiceV1* core{};
+    std::string producer_instance_id;
+    std::uint64_t overlay_snapshot_sequence{};
+    std::uint64_t local_overlay_drops{};
+    nte::combat_stats::OverlayPublishPolicy overlay_policy;
+    bool overlay_launch_attempted{};
+    bool restart_overlay_requested{};
+    AnomalyWebSocketServerInfoV1 overlay_server_info{sizeof(AnomalyWebSocketServerInfoV1)};
+    std::string overlay_error;
 } g_context;
 
 bool AppendRange(
@@ -318,7 +338,7 @@ bool OpenEncounterLog(
         session.report_started_utc_ms = utc_ms;
         if (!g_context.log_worker->Submit(nte::damage_log::ReportOpen{
                 session.report_id, world, utc_ms, ResolveBuildId(host),
-                "0.2.0", ResolveRuntimeVersion(host)})) return false;
+                "0.3.0", ResolveRuntimeVersion(host)})) return false;
     }
     session.encounter_id = nte::damage_log::GenerateUuidV4();
     if (session.encounter_id.empty()) return false;
@@ -370,7 +390,8 @@ void FinishEncounterLog(
         session.dropped_events, session.dropped_first_sequence,
         session.dropped_last_sequence, {}, session.service_unavailable_intervals,
         session.missing_sequence_ranges, session.open_missing_sequence_start,
-        session.service_gap_truncated, session.missing_ranges_truncated}));
+        session.service_gap_truncated, session.missing_ranges_truncated,
+        snapshot.players}));
     session.encounter_id.clear();
     session.encounter_started_utc_ms = 0;
     session.encounter_started_offset_us = 0;
@@ -419,6 +440,170 @@ void FinishReportLog(const char* reason, const std::int64_t utc_ms) {
     g_context.pending_missing_ranges_truncated = false;
 }
 
+const char* CaptureStatusName(const std::uint32_t status) noexcept {
+    switch (status) {
+    case ANOMALY_STATUS_V1_OK: return "available";
+    case ANOMALY_STATUS_V1_UNAVAILABLE: return "unavailable";
+    case ANOMALY_STATUS_V1_PERMISSION_DENIED: return "permission_denied";
+    default: return "error";
+    }
+}
+
+std::optional<std::filesystem::path> PluginDirectory() {
+    if (g_context.core == nullptr || g_context.core->plugin_directory == nullptr) {
+        return std::nullopt;
+    }
+    std::size_t size{};
+    if (!IsSizingStatus(g_context.core->plugin_directory(
+            g_context.core->user, nullptr, &size)) || size <= 1 || size > 32768) {
+        return std::nullopt;
+    }
+    std::string utf8(size, '\0');
+    if (g_context.core->plugin_directory(
+            g_context.core->user, utf8.data(), &size).code != ANOMALY_STATUS_V1_OK) {
+        return std::nullopt;
+    }
+    if (const auto end = utf8.find('\0'); end != std::string::npos) utf8.resize(end);
+    if (utf8.empty()) return std::nullopt;
+    const int wide_size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    if (wide_size <= 0) return std::nullopt;
+    std::wstring wide(static_cast<std::size_t>(wide_size), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
+            static_cast<int>(utf8.size()), wide.data(), wide_size) != wide_size) {
+        return std::nullopt;
+    }
+    return std::filesystem::path(std::move(wide));
+}
+
+bool LaunchOverlay(const std::uint16_t port, std::string& error_message) {
+    error_message.clear();
+    if (port == 0) {
+        error_message = "WebSocket listener is unavailable";
+        return false;
+    }
+    const auto package = PluginDirectory();
+    if (!package) {
+        error_message = "Plugin directory is unavailable";
+        return false;
+    }
+    std::error_code error;
+    const std::filesystem::path root = std::filesystem::weakly_canonical(*package, error);
+    if (error) {
+        error_message = "Plugin directory could not be resolved";
+        return false;
+    }
+    const std::filesystem::path executable = std::filesystem::weakly_canonical(
+        root / L"NteCombatOverlay.exe", error);
+    if (error || executable.parent_path() != root ||
+        !std::filesystem::is_regular_file(executable, error) || error) {
+        error_message = "NteCombatOverlay.exe is missing or outside the plugin package";
+        return false;
+    }
+    std::wstring command = L"\"" + executable.wstring() + L"\" --port " +
+        std::to_wstring(port);
+    std::vector<wchar_t> mutable_command(command.begin(), command.end());
+    mutable_command.push_back(L'\0');
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(executable.c_str(), mutable_command.data(), nullptr, nullptr,
+            FALSE, CREATE_UNICODE_ENVIRONMENT, nullptr, root.c_str(), &startup, &process)) {
+        error_message = "CreateProcessW failed: " + std::to_string(GetLastError());
+        return false;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
+}
+
+AnomalyWebSocketServerInfoV1 QueryOverlayServerInfo() {
+    AnomalyWebSocketServerInfoV1 info{sizeof(info)};
+    if (g_context.websocket == nullptr || g_context.websocket->server_info == nullptr ||
+        g_context.websocket->server_info(g_context.websocket->user, &info).code !=
+            ANOMALY_STATUS_V1_OK) {
+        info.port = 0;
+    }
+    return info;
+}
+
+std::uint64_t OverlayStateRevision(
+    const Snapshot& stats,
+    const std::uint32_t service_status,
+    const std::string& report_id,
+    const std::string& encounter_id,
+    const bool stopping) noexcept {
+    std::uint64_t value = 1469598103934665603ULL;
+    const auto mix = [&value](const std::uint64_t item) {
+        value ^= item;
+        value *= 1099511628211ULL;
+    };
+    mix(service_status);
+    mix(static_cast<std::uint64_t>(stats.state));
+    mix(stats.quality.partial);
+    mix(stats.quality.overflow);
+    mix(stats.quality.cursor_gap);
+    mix(stats.quality.aggregate_truncated);
+    mix(stopping);
+    for (const unsigned char character : report_id) mix(character);
+    mix(0xffU);
+    for (const unsigned char character : encounter_id) mix(character);
+    return value;
+}
+
+void PublishOverlay(
+    const Snapshot& stats,
+    const std::uint32_t service_status,
+    const std::uint64_t latest_sequence,
+    const std::string& report_id,
+    const std::string& encounter_id,
+    const std::int64_t utc_ms,
+    const TimePoint now,
+    const bool stopping = false,
+    const bool force = false) {
+    if (!g_context.overlay_policy.ShouldPoll(now, force || stopping)) return;
+    g_context.overlay_server_info = QueryOverlayServerInfo();
+    const auto& server = g_context.overlay_server_info;
+    g_context.overlay_policy.ObserveServer(now, server.connected_clients);
+    if (!stopping && server.port != 0 && !g_context.overlay_launch_attempted) {
+        g_context.overlay_launch_attempted = true;
+        static_cast<void>(LaunchOverlay(server.port, g_context.overlay_error));
+    }
+    if (g_context.websocket == nullptr || g_context.websocket->publish_text == nullptr ||
+        server.port == 0) return;
+    const std::uint64_t state_revision = OverlayStateRevision(
+        stats, service_status, report_id, encounter_id, stopping);
+    if (!g_context.overlay_policy.ShouldPublish(
+            now, state_revision, force || stopping)) return;
+    NteOverlaySnapshot message;
+    message.producer_instance_id = g_context.producer_instance_id;
+    message.snapshot_sequence = ++g_context.overlay_snapshot_sequence;
+    message.latest_damage_sequence = latest_sequence;
+    message.sent_utc_ms = utc_ms;
+    message.producer_stopping = stopping;
+    message.capture_available = service_status == ANOMALY_STATUS_V1_OK;
+    message.capture_status = CaptureStatusName(service_status);
+    message.report_id = report_id;
+    message.encounter_id = encounter_id;
+    if (!stats.outgoing_targets.empty()) {
+        message.primary_target = stats.outgoing_targets.front().label;
+    }
+    message.websocket_port = server.port;
+    message.connected_clients = server.connected_clients;
+    message.published_messages = server.published_messages;
+    message.transport_dropped_messages = server.dropped_messages +
+        g_context.local_overlay_drops;
+    message.combat = stats;
+    const std::string json = nte::combat_stats::SerializeOverlaySnapshot(message);
+    if (json.size() > nte::combat_stats::kMaximumOverlayMessageBytes ||
+        g_context.websocket->publish_text(
+            g_context.websocket->user, anomaly::sdk::StringView(json)).code !=
+            ANOMALY_STATUS_V1_OK) {
+        ++g_context.local_overlay_drops;
+    }
+    g_context.overlay_policy.RecordPublished(now, state_revision);
+}
+
 void ResetState() {
     g_context.engine.Reset();
     g_context.cursor.Clear();
@@ -429,6 +614,14 @@ void ResetState() {
     g_context.pending_cursor_gap_first.reset();
     g_context.pending_missing_sequence_ranges.clear();
     g_context.pending_missing_ranges_truncated = false;
+    g_context.producer_instance_id.clear();
+    g_context.overlay_snapshot_sequence = 0;
+    g_context.local_overlay_drops = 0;
+    g_context.overlay_policy.Reset();
+    g_context.overlay_launch_attempted = false;
+    g_context.restart_overlay_requested = false;
+    g_context.overlay_server_info = {sizeof(AnomalyWebSocketServerInfoV1)};
+    g_context.overlay_error.clear();
     std::scoped_lock lock(g_context.mutex);
     g_context.render = {};
     g_context.reset_requested = false;
@@ -462,13 +655,20 @@ void Update(void* context, double) {
     }
 
     bool reset_requested{};
+    bool restart_overlay_requested{};
     std::string delete_request;
     {
         std::scoped_lock lock(g_context.mutex);
         reset_requested = g_context.reset_requested;
         g_context.reset_requested = false;
+        restart_overlay_requested = g_context.restart_overlay_requested;
+        g_context.restart_overlay_requested = false;
         delete_request = std::move(g_context.delete_request);
         g_context.delete_request.clear();
+    }
+    if (restart_overlay_requested) {
+        g_context.overlay_launch_attempted = false;
+        g_context.overlay_error.clear();
     }
     if (!delete_request.empty() && g_context.log_worker) {
         static_cast<void>(g_context.log_worker->DeleteReport(std::move(delete_request)));
@@ -667,6 +867,14 @@ void Update(void* context, double) {
     next.log_root = g_context.log_root.string();
     next.report_id = g_context.log_session.report_id;
     next.encounter_id = g_context.log_session.encounter_id;
+    PublishOverlay(next.stats, service_status, latest, next.report_id,
+        next.encounter_id, utc_ms, now);
+    next.websocket_port = g_context.overlay_server_info.port;
+    next.overlay_clients = g_context.overlay_server_info.connected_clients;
+    next.overlay_published = g_context.overlay_server_info.published_messages;
+    next.overlay_dropped = g_context.overlay_server_info.dropped_messages +
+        g_context.local_overlay_drops;
+    next.overlay_error = g_context.overlay_error;
     std::scoped_lock lock(g_context.mutex);
     g_context.render = std::move(next);
 }
@@ -717,6 +925,27 @@ void DrawAggregateTable(
     ui->end_table(ui->user);
 }
 
+void DrawPlayerTable(const AnomalyUiServiceV1* ui, const std::vector<nte::combat_stats::PlayerRow>& rows) {
+    if (rows.empty()) {
+        Text(ui, "暂无已确认参战角色");
+        return;
+    }
+    for (const auto& row : rows) {
+        const double critical_rate = row.positive_hits != 0
+            ? static_cast<double>(row.critical_hits) * 100.0 / row.positive_hits : 0.0;
+        const double head_rate = row.positive_hits != 0
+            ? static_cast<double>(row.head_hits) * 100.0 / row.positive_hits : 0.0;
+        const double weak_rate = row.positive_hits != 0
+            ? static_cast<double>(row.weak_hits) * 100.0 / row.positive_hits : 0.0;
+        TextFormat(ui,
+            "%s  伤害 %lld  占比 %.1f%%  DPS %.1f  活跃 %.1f  10秒 %.1f  暴击 %.1f%%  爆头 %.1f%%  弱点 %.1f%%  最大 %lld (%s)",
+            ShortName(row.label).c_str(), static_cast<long long>(row.damage),
+            row.damage_share, row.encounter_dps, row.active_dps, row.rolling_dps,
+            critical_rate, head_rate, weak_rate, static_cast<long long>(row.maximum_hit),
+            ShortName(row.maximum_source_name).c_str());
+    }
+}
+
 void DrawOverview(const AnomalyUiServiceV1* ui, const RenderState& render) {
     const Snapshot& stats = render.stats;
     TextFormat(ui, "状态：%s  持续：%.1f 秒  上场角色：%zu",
@@ -734,6 +963,19 @@ void DrawOverview(const AnomalyUiServiceV1* ui, const RenderState& render) {
     TextFormat(ui, "HP：%.1f / %.1f  护盾：%.1f", stats.hp, stats.max_hp, stats.shield);
     TextFormat(ui, "采集服务：%s  最新序列：%llu", StatusName(render.service_status),
         static_cast<unsigned long long>(render.latest_sequence));
+    TextFormat(ui, "Overlay：127.0.0.1:%u  客户端：%u  发布：%llu  丢弃：%llu",
+        static_cast<unsigned>(render.websocket_port),
+        static_cast<unsigned>(render.overlay_clients),
+        static_cast<unsigned long long>(render.overlay_published),
+        static_cast<unsigned long long>(render.overlay_dropped));
+    if (!render.overlay_error.empty()) {
+        TextFormat(ui, "Overlay 启动错误：%s", render.overlay_error.c_str());
+    }
+    if (ui->button != nullptr && ui->button(
+            ui->user, anomaly::sdk::StringView("重新启动 Overlay"), 0.0F, 0.0F)) {
+        std::scoped_lock lock(g_context.mutex);
+        g_context.restart_overlay_requested = true;
+    }
     TextFormat(ui, "日志：%s  队列：%zu  丢失：%llu",
         render.log.running ? (render.log.ready ? "记录就绪" : "正在初始化") : "未运行",
         render.log.queue_depth,
@@ -879,6 +1121,8 @@ void Draw(void*, const AnomalyUiServiceV1* ui) {
             ui->end_tab_item(ui->user);
         }
         if (ui->begin_tab_item(ui->user, anomaly::sdk::StringView("参与者"), nullptr, 0, 1)) {
+            Text(ui, "确认参战角色");
+            DrawPlayerTable(ui, render.stats.players);
             Text(ui, "输出目标");
             DrawAggregateTable(ui, "targets", render.stats.outgoing_targets, render.stats.outgoing_damage);
             Text(ui, "承伤来源");
@@ -924,13 +1168,20 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1* host, void** context) 
     if (host == nullptr || context == nullptr) {
         return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
     }
-    const auto ui = anomaly::sdk::Host(host).Query<AnomalyUiServiceV1>(
+    const anomaly::sdk::Host services(host);
+    const auto ui = services.Query<AnomalyUiServiceV1>(
         ANOMALY_UI_SERVICE_V1_ID, ANOMALY_UI_SERVICE_V1_VERSION);
     if (!ui || ui->begin_window == nullptr || ui->end_window == nullptr || ui->text == nullptr) {
         return {ANOMALY_STATUS_V1_UNAVAILABLE, 0, {}};
     }
+    const auto core = services.Query<AnomalyCoreServiceV1>(
+        ANOMALY_CORE_SERVICE_V1_ID, ANOMALY_CORE_SERVICE_V1_VERSION);
+    const auto websocket = services.Query<AnomalyWebSocketServiceV1>(
+        ANOMALY_WEBSOCKET_SERVICE_V1_ID, ANOMALY_WEBSOCKET_SERVICE_V1_VERSION);
     g_context.host = host;
     g_context.ui = ui.get();
+    g_context.core = core.get();
+    g_context.websocket = websocket.get();
     ResetState();
     *context = &g_context;
     return anomaly::sdk::Ok();
@@ -943,6 +1194,7 @@ AnomalyStatusV1 ANOMALY_CALL Start(void* context) {
         g_context.log_worker.reset();
     }
     ResetState();
+    g_context.producer_instance_id = nte::damage_log::GenerateUuidV4();
     g_context.log_root = nte::damage_log::DefaultLogRoot();
     if (!g_context.log_root.empty()) {
         g_context.log_worker = std::make_unique<nte::damage_log::DamageLogWorker>(
@@ -955,6 +1207,16 @@ AnomalyStatusV1 ANOMALY_CALL Start(void* context) {
 AnomalyStatusV1 ANOMALY_CALL Stop(void*, std::uint32_t) {
     const auto now = nte::combat_stats::Clock::now();
     const auto utc_ms = UtcNowMilliseconds();
+    RenderState render;
+    {
+        std::scoped_lock lock(g_context.mutex);
+        render = g_context.render;
+    }
+    if (!g_context.producer_instance_id.empty()) {
+        PublishOverlay(g_context.engine.BuildSnapshot(now), render.service_status,
+            render.latest_sequence, g_context.log_session.report_id,
+            g_context.log_session.encounter_id, utc_ms, now, true, true);
+    }
     if (!g_context.log_session.encounter_id.empty()) {
         FinishEncounterLog("plugin_stop", g_context.engine.BuildSnapshot(now), now, utc_ms);
     }
@@ -975,6 +1237,8 @@ void ANOMALY_CALL Unload(void*) {
     ResetState();
     g_context.host = nullptr;
     g_context.ui = nullptr;
+    g_context.core = nullptr;
+    g_context.websocket = nullptr;
 }
 
 }  // namespace
@@ -989,7 +1253,7 @@ ANOMALY_SDK_EXPORT AnomalyStatusV1 ANOMALY_CALL AnomalyPluginEntryV1(
         anomaly::sdk::StringView("local.nte.combat-stats"),
         anomaly::sdk::StringView("NTE Combat Stats"),
         anomaly::sdk::StringView("Shikari"),
-        anomaly::sdk::StringView("0.2.0"),
+        anomaly::sdk::StringView("0.3.0"),
         Load, Start, Stop, Unload, Update, Draw};
     return anomaly::sdk::Ok();
 }
