@@ -7,17 +7,17 @@
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
-        "CMAKE_CONFIGURATION_TYPES": "Debug;RelWithDebInfo",
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release",
         "BUILD_TESTING": "ON"
       }
     }
   ],
   "buildPresets": [
     {"name": "debug", "configurePreset": "default", "configuration": "Debug"},
-    {"name": "release", "configurePreset": "default", "configuration": "RelWithDebInfo"}
+    {"name": "release", "configurePreset": "default", "configuration": "Release"}
   ],
   "testPresets": [
     {"name": "debug", "configurePreset": "default", "configuration": "Debug", "output": {"outputOnFailure": true}},
-    {"name": "release", "configurePreset": "default", "configuration": "RelWithDebInfo", "output": {"outputOnFailure": true}}
+    {"name": "release", "configurePreset": "default", "configuration": "Release", "output": {"outputOnFailure": true}}
   ]
 }

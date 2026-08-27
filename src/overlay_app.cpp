@@ -41,6 +41,7 @@ using nte::combat_stats::overlay::HitRegion;
 using nte::combat_stats::overlay::HitTest;
 using nte::combat_stats::overlay::SortColumn;
 using nte::combat_stats::overlay::SortPlayers;
+using nte::combat_stats::overlay::ScaleWindowExtent;
 using nte::combat_stats::overlay::WeakRate;
 using namespace std::chrono_literals;
 
@@ -172,10 +173,10 @@ std::filesystem::path SettingsPath() {
     return result / L"NTECombatStats" / L"overlay-settings.json";
 }
 
-void LoadSettings() {
+bool LoadSettings() {
     g_app.settings_path = SettingsPath();
     std::ifstream stream(g_app.settings_path, std::ios::binary);
-    if (!stream) return;
+    if (!stream) return false;
     try {
         const nlohmann::json json = nlohmann::json::parse(stream);
         auto& value = g_app.settings;
@@ -197,8 +198,10 @@ void LoadSettings() {
         value.sort_column = static_cast<SortColumn>(std::clamp(
             json.value("sort_column", static_cast<int>(value.sort_column)), 0, 9));
         value.descending = json.value("descending", value.descending);
+        return true;
     } catch (...) {
         // A malformed settings file is ignored; defaults remain usable.
+        return false;
     }
 }
 
@@ -655,9 +658,29 @@ void HandleMenu(const UINT id) {
     case MenuOpacity60: g_app.settings.opacity = 0.60F; break;
     case MenuOpacity75: g_app.settings.opacity = 0.75F; break;
     case MenuOpacity90: g_app.settings.opacity = 0.90F; break;
-    case MenuScale100: g_app.settings.ui_scale = 1.0F; break;
-    case MenuScale125: g_app.settings.ui_scale = 1.25F; break;
-    case MenuScale150: g_app.settings.ui_scale = 1.5F; break;
+    case MenuScale100:
+    case MenuScale125:
+    case MenuScale150: {
+        const float next_scale = id == MenuScale100 ? 1.0F :
+            (id == MenuScale125 ? 1.25F : 1.5F);
+        const float ratio = next_scale / g_app.settings.ui_scale;
+        RECT rect{};
+        GetWindowRect(g_app.window, &rect);
+        if (g_app.settings.collapsed) {
+            g_app.settings.width = std::max(1, static_cast<int>(std::lround(
+                static_cast<float>(g_app.settings.width) * ratio)));
+            g_app.settings.height = std::max(1, static_cast<int>(std::lround(
+                static_cast<float>(g_app.settings.height) * ratio)));
+        }
+        g_app.settings.ui_scale = next_scale;
+        SetWindowPos(g_app.window, nullptr, 0, 0,
+            std::max(1, static_cast<int>(std::lround(
+                static_cast<float>(rect.right - rect.left) * ratio))),
+            std::max(1, static_cast<int>(std::lround(
+                static_cast<float>(rect.bottom - rect.top) * ratio))),
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        break;
+    }
     case MenuShow: ShowWindow(g_app.window, SW_SHOWNOACTIVATE); return;
     case MenuHide: ShowWindow(g_app.window, SW_HIDE); return;
     case MenuExit: DestroyWindow(g_app.window); return;
@@ -848,7 +871,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_app.instance = instance;
     g_app.port = ParsePort();
     g_app.taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
-    LoadSettings();
+    const bool restored_settings = LoadSettings();
+    if (!restored_settings) {
+        const float dpi_scale = static_cast<float>(GetDpiForSystem()) / 96.0F;
+        const auto extent = ScaleWindowExtent(
+            g_app.settings.width, g_app.settings.height,
+            dpi_scale, g_app.settings.ui_scale);
+        g_app.settings.width = extent.width;
+        g_app.settings.height = extent.height;
+    }
     if (!InitializeRendering()) { CoUninitialize(); CloseHandle(mutex); return 2; }
 
     WNDCLASSEXW window_class{sizeof(window_class)};
@@ -857,7 +888,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     window_class.lpszClassName = kWindowClass;
     if (!RegisterClassExW(&window_class)) { CoUninitialize(); CloseHandle(mutex); return 3; }
-    const int height = g_app.settings.collapsed ? 34 : g_app.settings.height;
+    const int height = g_app.settings.collapsed
+        ? ScaleWindowExtent(1, 34,
+            static_cast<float>(GetDpiForSystem()) / 96.0F,
+            g_app.settings.ui_scale).height
+        : g_app.settings.height;
     g_app.window = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW,
         kWindowClass, kWindowTitle, WS_POPUP | WS_THICKFRAME,
         g_app.settings.x, g_app.settings.y, g_app.settings.width, height,

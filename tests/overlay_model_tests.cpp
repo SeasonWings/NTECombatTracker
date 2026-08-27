@@ -75,11 +75,24 @@ void HitTestingRespectsLockAndResizeGrip() {
           "locked overlay does not expose interactive hit regions");
 }
 
+void WindowExtentPreservesLogicalSizeAcrossDpiAndUiScale() {
+    const auto normal = ScaleWindowExtent(520, 220, 1.0F, 1.0F);
+    Check(normal.width == 520 && normal.height == 220,
+          "100 percent DPI uses the requested logical extent");
+    const auto dpi150 = ScaleWindowExtent(520, 220, 1.5F, 1.0F);
+    Check(dpi150.width == 780 && dpi150.height == 330,
+          "150 percent DPI scales the physical window extent");
+    const auto dpi200WithUiScale = ScaleWindowExtent(520, 220, 2.0F, 1.25F);
+    Check(dpi200WithUiScale.width == 1300 && dpi200WithUiScale.height == 550,
+          "DPI and user interface scaling compose without clipping rows");
+}
+
 }  // namespace
 
 int main() {
     SortsEachSupportedMetricStably();
     LayoutScalesAndCapsRows();
     HitTestingRespectsLockAndResizeGrip();
+    WindowExtentPreservesLogicalSizeAcrossDpiAndUiScale();
     std::cout << "All overlay model tests passed\n";
 }

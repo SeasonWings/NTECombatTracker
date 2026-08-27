@@ -43,11 +43,6 @@ EncounterState ParseState(const std::string& state) {
     throw std::runtime_error("encounter.state is invalid");
 }
 
-double Rate(const std::uint64_t count, const std::uint64_t total) noexcept {
-    return total == 0 ? 0.0 : static_cast<double>(count) * 100.0 /
-        static_cast<double>(total);
-}
-
 Json PlayerToJson(const PlayerRow& row) {
     return Json{
         {"identity_key", row.identity_key},
@@ -58,11 +53,11 @@ Json PlayerToJson(const PlayerRow& row) {
         {"damage", Decimal(row.damage)},
         {"positive_hits", Decimal(row.positive_hits)},
         {"critical_hits", Decimal(row.critical_hits)},
-        {"critical_rate", Rate(row.critical_hits, row.positive_hits)},
+        {"critical_rate", PlayerCriticalRate(row)},
         {"head_hits", Decimal(row.head_hits)},
-        {"head_rate", Rate(row.head_hits, row.positive_hits)},
+        {"head_rate", PlayerHeadRate(row)},
         {"weak_hits", Decimal(row.weak_hits)},
-        {"weak_rate", Rate(row.weak_hits, row.positive_hits)},
+        {"weak_rate", PlayerWeakRate(row)},
         {"maximum_hit", Decimal(row.maximum_hit)},
         {"maximum_ability", {{"source_id", Decimal(row.maximum_source_id)},
                              {"name", row.maximum_source_name}}},

@@ -42,7 +42,7 @@ anomaly-test-host --plugin .\build\package\NteCombatStats --reload 10 --ticks 60
 
 ## Win32 Overlay
 
-插件从自身包目录自动启动 `NteCombatOverlay.exe`。Overlay 默认 520×220、透明置顶，按角色显示伤害、占比、遭遇 DPS、暴击率和最大一击；右键可选择爆头率、弱点率、活跃 DPS、10 秒 DPS、透明度、缩放、置顶和离战隐藏。
+插件从自身包目录自动启动 `NteCombatOverlay.exe`。Overlay 默认 520×220、透明置顶，按角色显示伤害、占比、遭遇 DPS、暴击率和最大一击；右键可选择爆头率、弱点率、活跃 DPS、10 秒 DPS、主题、透明度、缩放、置顶和离战隐藏。
 
 - 点击列头切换排序；拖动顶栏移动，右下角缩放。
 - `Ctrl+Shift+F12` 切换锁定。锁定后窗口不激活并允许鼠标穿透。

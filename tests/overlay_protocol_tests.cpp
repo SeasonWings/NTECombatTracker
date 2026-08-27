@@ -130,6 +130,27 @@ void ParserRejectsForeignSemantics() {
           "non-client timestamp semantics should be rejected");
 }
 
+void ParserRejectsMissingRequiredFieldsAndUnsupportedVersions() {
+    std::string error;
+    std::string json = nte::combat_stats::SerializeOverlaySnapshot(ExampleSnapshot());
+    const std::string required = "\"producer_instance_id\":\"6ee28b4d-7039-4bc4-b068-1468f280745d\",";
+    json.erase(json.find(required), required.size());
+    Check(!nte::combat_stats::ParseOverlaySnapshot(json, error).has_value(),
+          "missing required fields should be rejected");
+
+    json = nte::combat_stats::SerializeOverlaySnapshot(ExampleSnapshot());
+    const std::string schema = "\"schema_version\":1";
+    json.replace(json.find(schema), schema.size(), "\"schema_version\":2");
+    Check(!nte::combat_stats::ParseOverlaySnapshot(json, error).has_value(),
+          "unsupported schema major versions should be rejected");
+
+    json = nte::combat_stats::SerializeOverlaySnapshot(ExampleSnapshot());
+    const std::string metric = "\"metric_version\":1";
+    json.replace(json.find(metric), metric.size(), "\"metric_version\":2");
+    Check(!nte::combat_stats::ParseOverlaySnapshot(json, error).has_value(),
+          "unsupported metric major versions should be rejected");
+}
+
 }  // namespace
 
 int main() {
@@ -137,6 +158,7 @@ int main() {
     ParserRejectsWrongProtocolAndAcceptsUnknownFields();
     ParserRejectsOversizedMessages();
     ParserRejectsForeignSemantics();
+    ParserRejectsMissingRequiredFieldsAndUnsupportedVersions();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return 1;

@@ -144,7 +144,7 @@ if(NTE_COMBAT_STATS_BUILD_PLUGIN)
         VERBATIM)
     add_custom_target(nte_combat_stats_zip ALL
         COMMAND "${CMAKE_COMMAND}" -E tar cf
-                "${CMAKE_BINARY_DIR}/NteCombatStats-0.3.0-$<CONFIG>.zip"
+                "${CMAKE_BINARY_DIR}/NteCombatStats-${PROJECT_VERSION}-$<CONFIG>.zip"
                 --format=zip
                 manifest.json plugin.dll NteCombatOverlay.exe
                 THIRD_PARTY_NOTICES.txt locales/zh-CN.json

@@ -527,7 +527,7 @@ AnomalyWebSocketServerInfoV1 QueryOverlayServerInfo() {
     return info;
 }
 
-std::uint64_t OverlayStateRevision(
+std::uint64_t OverlayUrgencyRevision(
     const Snapshot& stats,
     const std::uint32_t service_status,
     const std::string& report_id,
@@ -571,7 +571,7 @@ void PublishOverlay(
     }
     if (g_context.websocket == nullptr || g_context.websocket->publish_text == nullptr ||
         server.port == 0) return;
-    const std::uint64_t state_revision = OverlayStateRevision(
+    const std::uint64_t state_revision = OverlayUrgencyRevision(
         stats, service_status, report_id, encounter_id, stopping);
     if (!g_context.overlay_policy.ShouldPublish(
             now, state_revision, force || stopping)) return;
@@ -931,12 +931,9 @@ void DrawPlayerTable(const AnomalyUiServiceV1* ui, const std::vector<nte::combat
         return;
     }
     for (const auto& row : rows) {
-        const double critical_rate = row.positive_hits != 0
-            ? static_cast<double>(row.critical_hits) * 100.0 / row.positive_hits : 0.0;
-        const double head_rate = row.positive_hits != 0
-            ? static_cast<double>(row.head_hits) * 100.0 / row.positive_hits : 0.0;
-        const double weak_rate = row.positive_hits != 0
-            ? static_cast<double>(row.weak_hits) * 100.0 / row.positive_hits : 0.0;
+        const double critical_rate = nte::combat_stats::PlayerCriticalRate(row);
+        const double head_rate = nte::combat_stats::PlayerHeadRate(row);
+        const double weak_rate = nte::combat_stats::PlayerWeakRate(row);
         TextFormat(ui,
             "%s  伤害 %lld  占比 %.1f%%  DPS %.1f  活跃 %.1f  10秒 %.1f  暴击 %.1f%%  爆头 %.1f%%  弱点 %.1f%%  最大 %lld (%s)",
             ShortName(row.label).c_str(), static_cast<long long>(row.damage),

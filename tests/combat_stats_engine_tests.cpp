@@ -228,6 +228,77 @@ void ConfirmedCharactersMergeGenerationByResolvedPath() {
     }
 }
 
+void DistinctParticipatingCharactersProduceDistinctRows() {
+    CombatStatsEngine engine;
+    const TimePoint start{290s};
+    const Handle world{30, 1};
+    const Handle first{31, 1};
+    const Handle second{32, 1};
+    engine.ObserveCombatant(Combatant{world, first, 100.0, 100.0, 0.0}, start);
+    engine.ObserveCombatant(Combatant{world, second, 100.0, 100.0, 0.0}, start);
+
+    auto first_hit = Outgoing(1, world, first, 100);
+    first_hit.attacker_name = "/Game/Player/player_first_C";
+    engine.AcceptDamage(first_hit, start);
+    auto second_hit = Outgoing(2, world, second, 300);
+    second_hit.attacker_name = "/Game/Player/player_second_C";
+    engine.AcceptDamage(second_hit, start + 4s);
+
+    const auto snapshot = engine.BuildSnapshot(start + 4s);
+    Check(snapshot.players.size() == 2 && snapshot.controlled_character_count == 2,
+          "two distinct controlled characters that deal damage should produce two rows");
+    Check(snapshot.players[0].damage + snapshot.players[1].damage ==
+              snapshot.outgoing_damage,
+          "confirmed character damage rows should reconcile to encounter output");
+    Check(snapshot.players[0].encounter_dps + snapshot.players[1].encounter_dps ==
+              snapshot.encounter_dps,
+          "character encounter DPS should use the encounter denominator");
+}
+
+void SpectatorAndCrossWorldEventsDoNotConfirmCharacters() {
+    CombatStatsEngine engine;
+    const TimePoint start{295s};
+    const Handle world{40, 1};
+    const Handle player{41, 1};
+    engine.ObserveCombatant(Combatant{world, player, 100.0, 100.0, 0.0}, start);
+
+    auto spectator = Outgoing(1, world, Handle{42, 1}, 100);
+    spectator.attacker_name = "/Game/Npc/spectator_a_C";
+    spectator.victim = {43, 1};
+    Check(!engine.AcceptDamage(spectator, start),
+          "a bystander fight should not start an encounter");
+    auto cross_world = Outgoing(2, Handle{99, 1}, player, 100);
+    cross_world.attacker_name = "/Game/Player/player_C";
+    Check(!engine.AcceptDamage(cross_world, start),
+          "a controlled handle event from another world should be ignored");
+    const auto snapshot = engine.BuildSnapshot(start);
+    Check(snapshot.players.empty() && snapshot.controlled_character_count == 0,
+          "ignored events should not confirm controlled characters");
+}
+
+void BothControlledParticipantsStoreOneVisibleEvent() {
+    CombatStatsEngine engine;
+    const TimePoint start{298s};
+    const Handle world{50, 1};
+    const Handle attacker{51, 1};
+    const Handle victim{52, 1};
+    engine.ObserveCombatant(Combatant{world, attacker, 100.0, 100.0, 0.0}, start);
+    engine.ObserveCombatant(Combatant{world, victim, 100.0, 100.0, 0.0}, start);
+    auto hit = Outgoing(1, world, attacker, 100);
+    hit.attacker_name = "/Game/Player/attacker_C";
+    hit.victim = victim;
+    hit.victim_name = "/Game/Player/victim_C";
+    engine.AcceptDamage(hit, start);
+
+    const auto snapshot = engine.BuildSnapshot(start);
+    Check(snapshot.recent_events.size() == 1,
+          "an event whose two participants are controlled should be stored once");
+    Check(snapshot.outgoing_damage == 100 && snapshot.incoming_damage == 100,
+          "a both-controlled event should contribute once to each direction");
+    Check(snapshot.players.size() == 2,
+          "both controlled participants should be confirmed by the event");
+}
+
 void DirectionAndNonPositiveRules() {
     CombatStatsEngine engine;
     const TimePoint start{300s};
@@ -470,6 +541,9 @@ int main() {
     EncounterLifecycleAndCharacterRotation();
     ObservedCharactersRequireEncounterParticipation();
     ConfirmedCharactersMergeGenerationByResolvedPath();
+    DistinctParticipatingCharactersProduceDistinctRows();
+    SpectatorAndCrossWorldEventsDoNotConfirmCharacters();
+    BothControlledParticipantsStoreOneVisibleEvent();
     DirectionAndNonPositiveRules();
     EncounterAndRollingDps();
     EncounterDpsUsesPlayerActivityWindow();

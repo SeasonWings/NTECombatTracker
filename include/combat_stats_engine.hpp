@@ -83,6 +83,24 @@ struct PlayerRow {
     double rolling_dps{};
 };
 
+[[nodiscard]] inline double PlayerRate(
+    const std::uint64_t count, const std::uint64_t positive_hits) noexcept {
+    return positive_hits == 0 ? 0.0 : static_cast<double>(count) * 100.0 /
+        static_cast<double>(positive_hits);
+}
+
+[[nodiscard]] inline double PlayerCriticalRate(const PlayerRow& row) noexcept {
+    return PlayerRate(row.critical_hits, row.positive_hits);
+}
+
+[[nodiscard]] inline double PlayerHeadRate(const PlayerRow& row) noexcept {
+    return PlayerRate(row.head_hits, row.positive_hits);
+}
+
+[[nodiscard]] inline double PlayerWeakRate(const PlayerRow& row) noexcept {
+    return PlayerRate(row.weak_hits, row.positive_hits);
+}
+
 enum class EventDirection { Visible, Outgoing, Incoming, Both };
 
 struct RecentEvent {

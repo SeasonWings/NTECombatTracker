@@ -8,11 +8,6 @@
 namespace nte::combat_stats::overlay {
 namespace {
 
-double Rate(const std::uint64_t count, const std::uint64_t total) noexcept {
-    return total == 0 ? 0.0 : static_cast<double>(count) * 100.0 /
-        static_cast<double>(total);
-}
-
 double Metric(const PlayerRow& row, const SortColumn column) noexcept {
     switch (column) {
     case SortColumn::Character: return 0.0;
@@ -32,15 +27,15 @@ double Metric(const PlayerRow& row, const SortColumn column) noexcept {
 }  // namespace
 
 double CriticalRate(const PlayerRow& row) noexcept {
-    return Rate(row.critical_hits, row.positive_hits);
+    return PlayerCriticalRate(row);
 }
 
 double HeadRate(const PlayerRow& row) noexcept {
-    return Rate(row.head_hits, row.positive_hits);
+    return PlayerHeadRate(row);
 }
 
 double WeakRate(const PlayerRow& row) noexcept {
-    return Rate(row.weak_hits, row.positive_hits);
+    return PlayerWeakRate(row);
 }
 
 std::vector<PlayerRow> SortPlayers(
@@ -82,6 +77,21 @@ LayoutMetrics CalculateLayout(
     const auto rows = static_cast<std::size_t>(available / result.row_height);
     result.visible_rows = std::min(rows, player_count);
     return result;
+}
+
+WindowExtent ScaleWindowExtent(
+    const int logical_width,
+    const int logical_height,
+    const float dpi_scale,
+    const float ui_scale) noexcept {
+    const float scale = std::clamp(dpi_scale, 0.5F, 4.0F) *
+        std::clamp(ui_scale, 0.75F, 2.0F);
+    return {
+        std::max(1, static_cast<int>(std::lround(
+            static_cast<float>(logical_width) * scale))),
+        std::max(1, static_cast<int>(std::lround(
+            static_cast<float>(logical_height) * scale))),
+    };
 }
 
 HitRegion HitTest(

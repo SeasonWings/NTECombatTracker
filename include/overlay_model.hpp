@@ -38,6 +38,11 @@ struct LayoutMetrics {
     std::size_t visible_rows{};
 };
 
+struct WindowExtent {
+    int width{};
+    int height{};
+};
+
 enum class HitRegion : std::uint8_t { Client, Title, ColumnHeader, ResizeGrip };
 
 [[nodiscard]] double CriticalRate(const PlayerRow& row) noexcept;
@@ -53,6 +58,11 @@ enum class HitRegion : std::uint8_t { Client, Title, ColumnHeader, ResizeGrip };
     float scale,
     bool collapsed,
     std::size_t player_count) noexcept;
+[[nodiscard]] WindowExtent ScaleWindowExtent(
+    int logical_width,
+    int logical_height,
+    float dpi_scale,
+    float ui_scale) noexcept;
 [[nodiscard]] HitRegion HitTest(
     const LayoutMetrics& layout,
     float x,
