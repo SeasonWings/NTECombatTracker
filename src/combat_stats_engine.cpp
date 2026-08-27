@@ -103,12 +103,11 @@ bool CombatStatsEngine::IsRelevant(
 }
 
 bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint now) {
-    if (!IsRelevant(event.world, event.attacker, event.victim)) return false;
+    if (event.world != combatant_.world) return false;
+    const bool relevant = IsRelevant(event.world, event.attacker, event.victim);
+    if (state_ != EncounterState::Active && !relevant) return false;
     const bool outgoing = controlled_characters_.contains(event.attacker);
     const bool incoming = controlled_characters_.contains(event.victim);
-    if (!outgoing && !incoming) {
-        return false;
-    }
     if (state_ == EncounterState::Completed) ClearEncounter();
     if (state_ == EncounterState::Idle) {
         state_ = EncounterState::Active;
@@ -119,7 +118,7 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
         quality_.aggregate_truncated = pending_quality_.aggregate_truncated;
         pending_quality_ = {};
     }
-    last_activity_ = now;
+    if (relevant) last_activity_ = now;
     if (event.final_damage > 0) {
         if (outgoing) {
             quality_.overflow = SaturatingAdd(outgoing_damage_, event.final_damage) ||
@@ -150,16 +149,28 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
                 event.final_damage, other_incoming_source_, quality_.aggregate_truncated,
                 quality_.overflow);
         }
-    } else {
+    } else if (outgoing || incoming) {
         quality_.overflow = SaturatingIncrement(non_positive_events_) || quality_.overflow;
     }
 
     RecentEvent recent;
     recent.sequence = event.sequence;
+    recent.tick_sequence = event.tick_sequence;
+    recent.flags = event.flags;
     recent.direction = outgoing && incoming
         ? EventDirection::Both
-        : (outgoing ? EventDirection::Outgoing : EventDirection::Incoming);
+        : (outgoing ? EventDirection::Outgoing
+                    : (incoming ? EventDirection::Incoming : EventDirection::Visible));
     recent.final_damage = event.final_damage;
+    recent.display_damage = event.display_damage;
+    recent.basic_damage = event.basic_damage;
+    recent.hit_location = event.hit_location;
+    recent.damage_type = event.damage_type;
+    recent.display_type = event.display_type;
+    recent.reaction_type = event.reaction_type;
+    recent.reaction_display_type = event.reaction_display_type;
+    recent.received_utc_ms = event.received_utc_ms;
+    recent.received_offset_us = event.received_offset_us;
     recent.source = event.source_name;
     recent.attacker = event.attacker_name;
     recent.victim = event.victim_name;

@@ -1,5 +1,6 @@
 #include "combat_stats_engine.hpp"
 #include "damage_cursor.hpp"
+#include "log_worker.hpp"
 
 #include <anomaly/sdk/anomaly_sdk.h>
 #include <anomaly/sdk/cpp.hpp>
@@ -8,6 +9,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdio>
+#include <chrono>
+#include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -20,6 +24,7 @@ using nte::combat_stats::EncounterState;
 using nte::combat_stats::EventDirection;
 using nte::combat_stats::Handle;
 using nte::combat_stats::Snapshot;
+using nte::combat_stats::TimePoint;
 
 constexpr std::size_t kMaximumDrainPerUpdate = 256;
 constexpr std::size_t kMaximumResolvedNameBytes = 4096;
@@ -29,6 +34,20 @@ struct RenderState {
     Snapshot stats;
     std::uint32_t service_status{ANOMALY_STATUS_V1_UNAVAILABLE};
     std::uint64_t latest_sequence{};
+    nte::damage_log::LogWorkerStatus log;
+    std::string log_root;
+    std::string report_id;
+    std::string encounter_id;
+};
+
+struct LogSession {
+    Handle world;
+    std::string report_id;
+    std::string encounter_id;
+    TimePoint report_started{};
+    std::int64_t report_started_utc_ms{};
+    std::int64_t encounter_started_utc_ms{};
+    std::uint64_t encounter_started_offset_us{};
 };
 
 struct Context {
@@ -36,9 +55,14 @@ struct Context {
     const AnomalyUiServiceV1* ui{};
     CombatStatsEngine engine;
     nte::combat_stats::DamageCursor cursor;
+    std::unique_ptr<nte::damage_log::DamageLogWorker> log_worker;
+    std::filesystem::path log_root;
+    LogSession log_session;
     std::mutex mutex;
     RenderState render;
     bool reset_requested{};
+    std::string delete_request;
+    std::string pending_delete;
 } g_context;
 
 template <typename Struct, typename Field>
@@ -130,28 +154,132 @@ const char* StatusName(const std::uint32_t status) noexcept {
     }
 }
 
+std::int64_t UtcNowMilliseconds() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+std::uint64_t ReportOffsetMicroseconds(const TimePoint now) {
+    if (g_context.log_session.report_started == TimePoint{}) return 0;
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        now - g_context.log_session.report_started).count();
+    return elapsed > 0 ? static_cast<std::uint64_t>(elapsed) : 0;
+}
+
+std::string ResolveBuildId(const anomaly::sdk::Host& host) {
+    const auto service = host.Query<AnomalyNteBuildServiceV1>(
+        ANOMALY_NTE_BUILD_SERVICE_V1_ID, ANOMALY_NTE_BUILD_SERVICE_V1_VERSION);
+    if (!service || service->build_id == nullptr) return "unknown";
+    return ResolveName([service = service.get()](char* destination, std::size_t* size) {
+        return service->build_id(service->user, destination, size);
+    }, "unknown");
+}
+
+std::string ResolveRuntimeVersion(const anomaly::sdk::Host& host) {
+    const auto service = host.Query<AnomalyRuntimeInfoServiceV1>(
+        ANOMALY_RUNTIME_INFO_SERVICE_V1_ID, ANOMALY_RUNTIME_INFO_SERVICE_V1_VERSION);
+    if (!service || service->runtime_version_utf8 == nullptr) return "unknown";
+    return ResolveName([service = service.get()](char* destination, std::size_t* size) {
+        return service->runtime_version_utf8(service->user, destination, size);
+    }, "unknown");
+}
+
+bool OpenEncounterLog(
+    const anomaly::sdk::Host& host,
+    const Handle world,
+    const TimePoint now,
+    const std::int64_t utc_ms) {
+    if (!g_context.log_worker) return false;
+    auto& session = g_context.log_session;
+    if (session.report_id.empty()) {
+        session.report_id = nte::damage_log::GenerateUuidV4();
+        if (session.report_id.empty()) return false;
+        session.world = world;
+        session.report_started = now;
+        session.report_started_utc_ms = utc_ms;
+        if (!g_context.log_worker->Submit(nte::damage_log::ReportOpen{
+                session.report_id, world, utc_ms, ResolveBuildId(host),
+                "0.2.0", ResolveRuntimeVersion(host)})) return false;
+    }
+    session.encounter_id = nte::damage_log::GenerateUuidV4();
+    if (session.encounter_id.empty()) return false;
+    session.encounter_started_utc_ms = utc_ms;
+    session.encounter_started_offset_us = ReportOffsetMicroseconds(now);
+    return g_context.log_worker->Submit(nte::damage_log::EncounterOpen{
+        session.encounter_id, utc_ms, session.encounter_started_offset_us});
+}
+
+void FinishEncounterLog(
+    const char* reason,
+    const Snapshot& snapshot,
+    const TimePoint now,
+    const std::int64_t utc_ms) {
+    auto& session = g_context.log_session;
+    if (!g_context.log_worker || session.encounter_id.empty()) return;
+    auto quality = snapshot.quality;
+    const auto worker_status = g_context.log_worker->Status();
+    if (worker_status.dropped_events != 0) quality.partial = true;
+    static_cast<void>(g_context.log_worker->Submit(nte::damage_log::EncounterClose{
+        session.encounter_id, reason, utc_ms, ReportOffsetMicroseconds(now),
+        snapshot.outgoing_damage, snapshot.incoming_damage,
+        snapshot.encounter_dps, snapshot.duration_seconds, quality,
+        worker_status.dropped_events, worker_status.dropped_first_sequence,
+        worker_status.dropped_last_sequence}));
+    session.encounter_id.clear();
+    session.encounter_started_utc_ms = 0;
+    session.encounter_started_offset_us = 0;
+}
+
+void FinishReportLog(const char* reason, const std::int64_t utc_ms) {
+    auto& session = g_context.log_session;
+    if (g_context.log_worker && !session.report_id.empty()) {
+        static_cast<void>(g_context.log_worker->Submit(
+            nte::damage_log::ReportClose{reason, utc_ms, false}));
+    }
+    session = {};
+}
+
 void ResetState() {
     g_context.engine.Reset();
     g_context.cursor.Clear();
+    g_context.log_session = {};
     std::scoped_lock lock(g_context.mutex);
     g_context.render = {};
     g_context.reset_requested = false;
+    g_context.delete_request.clear();
+    g_context.pending_delete.clear();
 }
 
 void Update(void* context, double) {
     if (context != &g_context || g_context.host == nullptr) return;
     const auto now = nte::combat_stats::Clock::now();
+    const std::int64_t utc_ms = UtcNowMilliseconds();
     const anomaly::sdk::Host host(g_context.host);
     const auto combat = host.Query<AnomalyNteCombatServiceV1>(
         ANOMALY_NTE_COMBAT_SERVICE_V1_ID, ANOMALY_NTE_COMBAT_SERVICE_V1_VERSION);
 
+    g_context.engine.Advance(now);
+    if (!g_context.log_session.encounter_id.empty() &&
+        g_context.engine.state() == EncounterState::Completed) {
+        FinishEncounterLog("inactivity", g_context.engine.BuildSnapshot(now), now, utc_ms);
+    }
+
     bool reset_requested{};
+    std::string delete_request;
     {
         std::scoped_lock lock(g_context.mutex);
         reset_requested = g_context.reset_requested;
         g_context.reset_requested = false;
+        delete_request = std::move(g_context.delete_request);
+        g_context.delete_request.clear();
+    }
+    if (!delete_request.empty() && g_context.log_worker) {
+        static_cast<void>(g_context.log_worker->DeleteReport(std::move(delete_request)));
     }
     if (reset_requested) {
+        if (!g_context.log_session.encounter_id.empty()) {
+            FinishEncounterLog("manual_reset", g_context.engine.BuildSnapshot(now), now, utc_ms);
+        }
         g_context.engine.Reset();
         g_context.cursor.RequestReset();
     }
@@ -177,8 +305,17 @@ void Update(void* context, double) {
             (combatant.flags & ANOMALY_NTE_COMBATANT_V1_VALID) != 0 &&
             (combatant.flags & ANOMALY_NTE_COMBATANT_V1_STALE) == 0;
         if (valid_combatant) {
+            const Handle observed_world = ConvertHandle(combatant.world);
+            if (!g_context.log_session.report_id.empty() &&
+                observed_world != g_context.log_session.world) {
+                if (!g_context.log_session.encounter_id.empty()) {
+                    FinishEncounterLog("world_changed",
+                        g_context.engine.BuildSnapshot(now), now, utc_ms);
+                }
+                FinishReportLog("world_changed", utc_ms);
+            }
             g_context.engine.ObserveCombatant({
-                ConvertHandle(combatant.world), ConvertHandle(combatant.character),
+                observed_world, ConvertHandle(combatant.character),
                 combatant.hp, combatant.max_hp, combatant.shield}, now);
             if ((combatant.flags & ANOMALY_NTE_COMBATANT_V1_PARTIAL) != 0) {
                 sampled_partial = true;
@@ -216,19 +353,42 @@ void Update(void* context, double) {
                     }
                     nte::combat_stats::DamageEvent normalized;
                     normalized.sequence = event.sequence;
+                    normalized.tick_sequence = event.tick_sequence;
+                    normalized.flags = event.flags;
                     normalized.world = ConvertHandle(event.world);
                     normalized.attacker = ConvertHandle(event.attacker);
                     normalized.victim = ConvertHandle(event.victim);
                     normalized.source_id = event.source_id;
+                    normalized.display_damage = event.display_damage;
+                    normalized.basic_damage = event.basic_damage;
                     normalized.final_damage = event.final_damage;
-                    if (!g_context.engine.IsRelevant(
-                            normalized.world, normalized.attacker, normalized.victim)) {
-                        continue;
+                    normalized.hit_location = {event.hit_location[0],
+                        event.hit_location[1], event.hit_location[2]};
+                    normalized.damage_type = event.damage_type;
+                    normalized.display_type = event.display_type;
+                    normalized.reaction_type = event.reaction_type;
+                    normalized.reaction_display_type = event.reaction_display_type;
+                    const bool player_related = g_context.engine.IsRelevant(
+                        normalized.world, normalized.attacker, normalized.victim);
+                    if (g_context.engine.state() != EncounterState::Active &&
+                        player_related && !OpenEncounterLog(
+                            host, normalized.world, now, utc_ms)) {
+                        g_context.engine.MarkPartial(false);
                     }
+                    normalized.received_utc_ms = utc_ms;
+                    normalized.received_offset_us = ReportOffsetMicroseconds(now);
                     normalized.source_name = ResolveSource(combat.get(), event.source_id);
                     normalized.attacker_name = ResolveParticipant(combat.get(), event.attacker);
                     normalized.victim_name = ResolveParticipant(combat.get(), event.victim);
-                    static_cast<void>(g_context.engine.AcceptDamage(normalized, now));
+                    if (g_context.engine.AcceptDamage(normalized, now) &&
+                        g_context.log_worker &&
+                        !g_context.log_session.encounter_id.empty() &&
+                        !g_context.log_worker->Submit(nte::damage_log::LoggedDamage{
+                            normalized, utc_ms, normalized.received_offset_us,
+                            player_related})) {
+                        g_context.engine.MarkPartial(false);
+                        g_context.engine.MarkOverflow();
+                    }
                     continue;
                 }
                 if (event_status.code == ANOMALY_STATUS_V1_NOT_FOUND &&
@@ -248,11 +408,14 @@ void Update(void* context, double) {
         static_cast<void>(g_context.cursor.BeginFrame(std::nullopt));
     }
 
-    g_context.engine.Advance(now);
     RenderState next;
     next.stats = g_context.engine.BuildSnapshot(now);
     next.service_status = service_status;
     next.latest_sequence = latest;
+    if (g_context.log_worker) next.log = g_context.log_worker->Status();
+    next.log_root = g_context.log_root.string();
+    next.report_id = g_context.log_session.report_id;
+    next.encounter_id = g_context.log_session.encounter_id;
     std::scoped_lock lock(g_context.mutex);
     g_context.render = std::move(next);
 }
@@ -320,6 +483,19 @@ void DrawOverview(const AnomalyUiServiceV1* ui, const RenderState& render) {
     TextFormat(ui, "HP：%.1f / %.1f  护盾：%.1f", stats.hp, stats.max_hp, stats.shield);
     TextFormat(ui, "采集服务：%s  最新序列：%llu", StatusName(render.service_status),
         static_cast<unsigned long long>(render.latest_sequence));
+    TextFormat(ui, "日志：%s  队列：%zu  丢失：%llu",
+        render.log.running ? (render.log.ready ? "记录就绪" : "正在初始化") : "未运行",
+        render.log.queue_depth,
+        static_cast<unsigned long long>(render.log.dropped_events));
+    if (!render.report_id.empty()) {
+        TextFormat(ui, "Report：%s  Encounter：%s",
+            render.report_id.c_str(), render.encounter_id.empty() ? "等待下一场" :
+            render.encounter_id.c_str());
+    }
+    TextFormat(ui, "日志目录：%s", render.log_root.c_str());
+    if (!render.log.last_error.empty()) {
+        TextFormat(ui, "写入错误：%s", render.log.last_error.c_str());
+    }
     if (stats.quality.partial || stats.quality.overflow ||
         stats.quality.cursor_gap || stats.quality.aggregate_truncated) {
         TextFormat(ui, "数据质量：%s%s%s%s",
@@ -327,6 +503,63 @@ void DrawOverview(const AnomalyUiServiceV1* ui, const RenderState& render) {
             stats.quality.overflow ? "OVERFLOW " : "",
             stats.quality.cursor_gap ? "CURSOR_GAP " : "",
             stats.quality.aggregate_truncated ? "AGGREGATE_LIMIT" : "");
+    }
+}
+
+void DrawHistory(const AnomalyUiServiceV1* ui, const RenderState& render) {
+    if (!render.log.ready && render.log.history.empty()) {
+        Text(ui, "历史索引正在加载或不可用");
+        return;
+    }
+    if (render.log.history.empty()) {
+        Text(ui, "暂无已保存战斗日志");
+        return;
+    }
+    const std::size_t count = (std::min<std::size_t>)(50, render.log.history.size());
+    for (std::size_t index{}; index < count; ++index) {
+        const auto& report = render.log.history[index];
+        TextFormat(ui,
+            "Report %s  开始：%lld  %s  遭遇：%llu  事件：%llu  %.2f MiB  %s",
+            report.report_id.c_str(), static_cast<long long>(report.started_utc_ms),
+            report.open ? "OPEN" : report.close_reason.c_str(),
+            static_cast<unsigned long long>(report.encounter_count),
+            static_cast<unsigned long long>(report.event_count),
+            static_cast<double>(report.total_bytes) / (1024.0 * 1024.0),
+            report.complete ? "完整" : "不完整");
+        for (const auto& encounter : report.encounters) {
+            TextFormat(ui, "  %s  %.1f秒  输出 %lld  承伤 %lld  DPS %.1f  %s  %s",
+                encounter.encounter_id.c_str(), encounter.duration_seconds,
+                static_cast<long long>(encounter.outgoing_damage),
+                static_cast<long long>(encounter.incoming_damage),
+                encounter.encounter_dps, encounter.end_reason.c_str(),
+                encounter.complete ? "完整" : "不完整");
+        }
+        if (!report.open && ui->button != nullptr) {
+            bool pending{};
+            {
+                std::scoped_lock lock(g_context.mutex);
+                pending = g_context.pending_delete == report.report_id;
+            }
+            if (!pending) {
+                const std::string label = "删除此 Report##" + report.report_id;
+                if (ui->button(ui->user, anomaly::sdk::StringView(label), 0.0F, 0.0F)) {
+                    std::scoped_lock lock(g_context.mutex);
+                    g_context.pending_delete = report.report_id;
+                }
+            } else {
+                const std::string confirm = "确认永久删除##" + report.report_id;
+                const std::string cancel = "取消删除##" + report.report_id;
+                if (ui->button(ui->user, anomaly::sdk::StringView(confirm), 0.0F, 0.0F)) {
+                    std::scoped_lock lock(g_context.mutex);
+                    g_context.delete_request = report.report_id;
+                    g_context.pending_delete.clear();
+                }
+                if (ui->button(ui->user, anomaly::sdk::StringView(cancel), 0.0F, 0.0F)) {
+                    std::scoped_lock lock(g_context.mutex);
+                    g_context.pending_delete.clear();
+                }
+            }
+        }
     }
 }
 
@@ -378,15 +611,30 @@ void Draw(void*, const AnomalyUiServiceV1* ui) {
             for (std::size_t offset{}; offset < count; ++offset) {
                 const auto& event = render.stats.recent_events[render.stats.recent_events.size() - 1 - offset];
                 const char* direction = event.direction == EventDirection::Both
-                    ? "双向" : (event.direction == EventDirection::Outgoing ? "输出" : "承伤");
-                TextFormat(ui, "#%llu [%s] %lld%s  %s  %s -> %s",
-                    static_cast<unsigned long long>(event.sequence), direction,
+                    ? "双向" : (event.direction == EventDirection::Outgoing ? "输出" :
+                        (event.direction == EventDirection::Incoming ? "承伤" : "可见"));
+                const bool critical = (event.flags & ANOMALY_NTE_DAMAGE_V1_CRITICAL) != 0;
+                const bool head_hit = (event.flags & ANOMALY_NTE_DAMAGE_V1_HEAD_HIT) != 0;
+                const bool weak = (event.flags & ANOMALY_NTE_DAMAGE_V1_WEAK_UNBALANCE) != 0;
+                TextFormat(ui, "+%.3fs #%llu/t%llu [%s] final=%lld basic=%lld display=%lld%s%s%s%s  %s  %s -> %s",
+                    static_cast<double>(event.received_offset_us) / 1'000'000.0,
+                    static_cast<unsigned long long>(event.sequence),
+                    static_cast<unsigned long long>(event.tick_sequence),
+                    direction,
                     static_cast<long long>(event.final_damage),
+                    static_cast<long long>(event.basic_damage),
+                    static_cast<long long>(event.display_damage),
                     event.final_damage <= 0 ? " (不计DPS)" : "",
+                    critical ? " 暴击" : "", head_hit ? " 爆头" : "",
+                    weak ? " 弱点" : "",
                     ShortName(event.source).c_str(), ShortName(event.attacker).c_str(),
                     ShortName(event.victim).c_str());
             }
             if (count == 0) Text(ui, "暂无当前玩家相关事件");
+            ui->end_tab_item(ui->user);
+        }
+        if (ui->begin_tab_item(ui->user, anomaly::sdk::StringView("历史"), nullptr, 0, 1)) {
+            DrawHistory(ui, render);
             ui->end_tab_item(ui->user);
         }
         ui->end_tab_bar(ui->user);
@@ -411,16 +659,40 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1* host, void** context) 
 
 AnomalyStatusV1 ANOMALY_CALL Start(void* context) {
     if (context != &g_context) return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
+    if (g_context.log_worker) {
+        g_context.log_worker->Stop();
+        g_context.log_worker.reset();
+    }
     ResetState();
+    g_context.log_root = nte::damage_log::DefaultLogRoot();
+    if (!g_context.log_root.empty()) {
+        g_context.log_worker = std::make_unique<nte::damage_log::DamageLogWorker>(
+            g_context.log_root);
+        static_cast<void>(g_context.log_worker->Start());
+    }
     return anomaly::sdk::Ok();
 }
 
 AnomalyStatusV1 ANOMALY_CALL Stop(void*, std::uint32_t) {
+    const auto now = nte::combat_stats::Clock::now();
+    const auto utc_ms = UtcNowMilliseconds();
+    if (!g_context.log_session.encounter_id.empty()) {
+        FinishEncounterLog("plugin_stop", g_context.engine.BuildSnapshot(now), now, utc_ms);
+    }
+    FinishReportLog("plugin_stop", utc_ms);
+    if (g_context.log_worker) {
+        g_context.log_worker->Stop();
+        g_context.log_worker.reset();
+    }
     ResetState();
     return anomaly::sdk::Ok();
 }
 
 void ANOMALY_CALL Unload(void*) {
+    if (g_context.log_worker) {
+        g_context.log_worker->Stop();
+        g_context.log_worker.reset();
+    }
     ResetState();
     g_context.host = nullptr;
     g_context.ui = nullptr;
@@ -438,7 +710,7 @@ ANOMALY_SDK_EXPORT AnomalyStatusV1 ANOMALY_CALL AnomalyPluginEntryV1(
         anomaly::sdk::StringView("local.nte.combat-stats"),
         anomaly::sdk::StringView("NTE Combat Stats"),
         anomaly::sdk::StringView("Shikari"),
-        anomaly::sdk::StringView("0.1.0"),
+        anomaly::sdk::StringView("0.2.0"),
         Load, Start, Stop, Unload, Update, Draw};
     return anomaly::sdk::Ok();
 }

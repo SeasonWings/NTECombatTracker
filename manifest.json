@@ -2,10 +2,10 @@
   "schemaVersion": 2,
   "id": "local.nte.combat-stats",
   "name": "NTE Combat Stats",
-  "description": "只读的当前会话伤害、DPS、来源与参与者统计。",
+  "description": "只读的实时伤害统计与高保真本地 JSONL 战斗日志。",
   "author": "Shikari",
   "license": "AGPL-3.0-only",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "entry": "plugin.dll",
   "api": {"major": 1, "minMinor": 0, "maxMinor": 0},
   "games": ["nte"],
@@ -13,7 +13,10 @@
   "loadPhase": "game-ready",
   "services": [
     {"id": "anomaly.ui", "minVersion": 1},
+    {"id": "anomaly.json", "minVersion": 1},
+    {"id": "anomaly.runtime-info", "minVersion": 1, "optional": true},
+    {"id": "anomaly.nte.build", "minVersion": 1, "optional": true},
     {"id": "anomaly.nte.combat", "minVersion": 1, "optional": true}
   ],
-  "capabilities": ["ui", "nte-combat-read"]
+  "capabilities": ["ui", "json", "runtime-info", "nte-build", "nte-combat-read"]
 }

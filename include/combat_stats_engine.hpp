@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -35,11 +36,22 @@ struct Combatant {
 
 struct DamageEvent {
     std::uint64_t sequence{};
+    std::uint64_t tick_sequence{};
+    std::uint32_t flags{};
     Handle world;
     Handle attacker;
     Handle victim;
     std::uint64_t source_id{};
+    std::int64_t display_damage{};
+    std::int64_t basic_damage{};
     std::int64_t final_damage{};
+    std::array<double, 3> hit_location{};
+    std::uint32_t damage_type{};
+    std::uint32_t display_type{};
+    std::uint32_t reaction_type{};
+    std::uint32_t reaction_display_type{};
+    std::int64_t received_utc_ms{};
+    std::uint64_t received_offset_us{};
     std::string source_name;
     std::string attacker_name;
     std::string victim_name;
@@ -52,12 +64,23 @@ struct AggregateRow {
     std::int64_t maximum_hit{};
 };
 
-enum class EventDirection { Outgoing, Incoming, Both };
+enum class EventDirection { Visible, Outgoing, Incoming, Both };
 
 struct RecentEvent {
     std::uint64_t sequence{};
+    std::uint64_t tick_sequence{};
+    std::uint32_t flags{};
     EventDirection direction{EventDirection::Outgoing};
     std::int64_t final_damage{};
+    std::int64_t display_damage{};
+    std::int64_t basic_damage{};
+    std::array<double, 3> hit_location{};
+    std::uint32_t damage_type{};
+    std::uint32_t display_type{};
+    std::uint32_t reaction_type{};
+    std::uint32_t reaction_display_type{};
+    std::int64_t received_utc_ms{};
+    std::uint64_t received_offset_us{};
     std::string source;
     std::string attacker;
     std::string victim;
@@ -116,6 +139,7 @@ public:
     void Reset();
     void MarkPartial(bool cursor_gap);
     void MarkOverflow();
+    [[nodiscard]] EncounterState state() const noexcept { return state_; }
     [[nodiscard]] Snapshot BuildSnapshot(TimePoint now) const;
 
 private:

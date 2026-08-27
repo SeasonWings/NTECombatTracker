@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(NteCombatStatsPlugin VERSION 0.1.0 LANGUAGES CXX)
+project(NteCombatStatsPlugin VERSION 0.2.0 LANGUAGES CXX)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "NTE Combat Stats targets Windows x64")
@@ -12,10 +12,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(nte_combat_stats_engine STATIC
     src/combat_stats_engine.cpp
-    src/damage_cursor.cpp)
+    src/damage_cursor.cpp
+    src/damage_log.cpp
+    src/log_worker.cpp)
 target_include_directories(nte_combat_stats_engine PUBLIC include)
 target_compile_definitions(nte_combat_stats_engine PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(nte_combat_stats_engine PUBLIC bcrypt shell32 ole32)
 if(MSVC)
     target_compile_options(nte_combat_stats_engine PRIVATE /W4 /permissive- /EHsc /utf-8)
 endif()
@@ -28,6 +31,13 @@ if(BUILD_TESTING)
         target_compile_options(nte_combat_stats_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
     endif()
     add_test(NAME nte_combat_stats_engine COMMAND nte_combat_stats_tests)
+
+    add_executable(nte_damage_log_tests tests/damage_log_tests.cpp)
+    target_link_libraries(nte_damage_log_tests PRIVATE nte_combat_stats_engine)
+    if(MSVC)
+        target_compile_options(nte_damage_log_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME nte_damage_log COMMAND nte_damage_log_tests)
 endif()
 
 option(NTE_COMBAT_STATS_BUILD_PLUGIN "Build the Anomaly plugin package" ON)

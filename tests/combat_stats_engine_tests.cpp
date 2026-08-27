@@ -23,6 +23,12 @@ void Check(const bool condition, const char* message) {
     ++failures;
 }
 
+DamageEvent Outgoing(
+    std::uint64_t sequence,
+    Handle world,
+    Handle attacker,
+    std::int64_t damage);
+
 void RelevantDamageStartsEncounter() {
     CombatStatsEngine engine;
     const TimePoint start{100s};
@@ -45,6 +51,59 @@ void RelevantDamageStartsEncounter() {
     Check(snapshot.state == EncounterState::Active, "first player event should start encounter");
     Check(snapshot.outgoing_damage == 125, "outgoing damage should be accumulated");
     Check(snapshot.outgoing_positive_hits == 1, "positive outgoing hit should be counted");
+}
+
+void ActiveEncounterCapturesEveryVisibleDamageField() {
+    CombatStatsEngine engine;
+    const TimePoint start{150s};
+    const Handle world{5, 1};
+    const Handle player{6, 1};
+    engine.ObserveCombatant(Combatant{world, player, 100.0, 100.0, 0.0}, start);
+    Check(engine.AcceptDamage(Outgoing(1, world, player, 10), start),
+          "player damage should trigger the encounter");
+
+    DamageEvent visible;
+    visible.sequence = 2;
+    visible.tick_sequence = 77;
+    visible.flags = 0x0f;
+    visible.world = world;
+    visible.attacker = {70, 2};
+    visible.victim = {80, 3};
+    visible.source_id = 999;
+    visible.display_damage = 31;
+    visible.basic_damage = 29;
+    visible.final_damage = 25;
+    visible.hit_location = {1.5, 2.5, 3.5};
+    visible.damage_type = 4;
+    visible.display_type = 5;
+    visible.reaction_type = 6;
+    visible.reaction_display_type = 7;
+    visible.source_name = "NpcSkill";
+    visible.attacker_name = "NpcA";
+    visible.victim_name = "NpcB";
+
+    Check(engine.AcceptDamage(visible, start + 1s),
+          "an active encounter should capture unrelated visible damage");
+    const auto snapshot = engine.BuildSnapshot(start + 1s);
+    Check(snapshot.outgoing_damage == 10,
+          "unrelated visible damage should not enter controlled-character output");
+    Check(snapshot.recent_events.size() == 2,
+          "visible damage should be retained in the recent event stream");
+    if (snapshot.recent_events.size() == 2) {
+        const auto& recent = snapshot.recent_events.back();
+        Check(recent.tick_sequence == 77 && recent.flags == 0x0f,
+              "sequence metadata should be retained");
+        Check(recent.display_damage == 31 && recent.basic_damage == 29 &&
+                  recent.final_damage == 25,
+              "all three damage values should be retained");
+        Check(recent.hit_location[0] == 1.5 && recent.damage_type == 4 &&
+                  recent.reaction_display_type == 7,
+              "damage classification and hit location should be retained");
+    }
+
+    engine.Advance(start + 10s);
+    Check(engine.BuildSnapshot(start + 10s).state == EncounterState::Completed,
+          "unrelated visible damage must not extend player activity timeout");
 }
 
 DamageEvent Outgoing(
@@ -327,6 +386,7 @@ void WorldChangeDropsPendingQuality() {
 
 int main() {
     RelevantDamageStartsEncounter();
+    ActiveEncounterCapturesEveryVisibleDamageField();
     EncounterLifecycleAndCharacterRotation();
     DirectionAndNonPositiveRules();
     EncounterAndRollingDps();

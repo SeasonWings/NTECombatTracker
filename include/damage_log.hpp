@@ -1,0 +1,108 @@
+#pragma once
+
+#include "combat_stats_engine.hpp"
+
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace nte::damage_log {
+
+inline constexpr std::uint32_t kSchemaVersion = 1;
+inline constexpr std::uint32_t kMetricVersion = 1;
+
+struct ReportOpen {
+    std::string report_id;
+    combat_stats::Handle world;
+    std::int64_t started_utc_ms{};
+    std::string game_build;
+    std::string plugin_version{"0.2.0"};
+    std::string runtime_version;
+};
+
+struct EncounterOpen {
+    std::string encounter_id;
+    std::int64_t started_utc_ms{};
+    std::uint64_t started_offset_us{};
+};
+
+struct LoggedDamage {
+    combat_stats::DamageEvent event;
+    std::int64_t received_utc_ms{};
+    std::uint64_t received_offset_us{};
+    bool player_related{};
+};
+
+struct EncounterClose {
+    std::string encounter_id;
+    std::string reason;
+    std::int64_t closed_utc_ms{};
+    std::uint64_t closed_offset_us{};
+    std::int64_t outgoing_damage{};
+    std::int64_t incoming_damage{};
+    double encounter_dps{};
+    double duration_seconds{};
+    combat_stats::Quality quality;
+    std::uint64_t dropped_events{};
+    std::uint64_t dropped_first_sequence{};
+    std::uint64_t dropped_last_sequence{};
+};
+
+struct ReportClose {
+    std::string reason;
+    std::int64_t closed_utc_ms{};
+    bool unclean_shutdown{};
+};
+
+struct EncounterHistory {
+    std::string encounter_id;
+    std::string end_reason;
+    double duration_seconds{};
+    std::int64_t outgoing_damage{};
+    std::int64_t incoming_damage{};
+    double encounter_dps{};
+    bool complete{true};
+};
+
+struct ReportHistory {
+    std::string report_id;
+    std::int64_t started_utc_ms{};
+    std::int64_t closed_utc_ms{};
+    std::uint64_t event_count{};
+    std::uint64_t encounter_count{};
+    std::uint64_t total_bytes{};
+    bool open{};
+    bool complete{true};
+    std::string close_reason;
+    std::vector<EncounterHistory> encounters;
+};
+
+class DamageLogRepository {
+public:
+    explicit DamageLogRepository(std::filesystem::path root);
+    ~DamageLogRepository();
+    DamageLogRepository(DamageLogRepository&&) noexcept;
+    DamageLogRepository& operator=(DamageLogRepository&&) noexcept;
+    DamageLogRepository(const DamageLogRepository&) = delete;
+    DamageLogRepository& operator=(const DamageLogRepository&) = delete;
+
+    bool Recover(std::string& error);
+    bool BeginReport(const ReportOpen& report, std::string& error);
+    bool BeginEncounter(const EncounterOpen& encounter, std::string& error);
+    bool Append(const LoggedDamage& damage, std::string& error);
+    bool Flush(std::string& error);
+    bool EndEncounter(const EncounterClose& encounter, std::string& error);
+    bool CloseReport(const ReportClose& report, std::string& error);
+    bool DeleteReport(const std::string& report_id, std::string& error);
+
+    [[nodiscard]] std::vector<ReportHistory> History() const;
+    [[nodiscard]] bool HasOpenReport() const noexcept;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace nte::damage_log
