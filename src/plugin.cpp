@@ -52,16 +52,8 @@ struct NameCacheEntry {
 
 struct RenderState {
     std::shared_ptr<const NteOverlaySnapshot> snapshot;
-    std::uint32_t service_status{ANOMALY_STATUS_V1_UNAVAILABLE};
-    std::uint64_t latest_sequence{};
     nte::damage_log::LogWorkerStatus log;
     std::string log_root;
-    std::string report_id;
-    std::string encounter_id;
-    std::uint16_t websocket_port{};
-    std::uint32_t overlay_clients{};
-    std::uint64_t overlay_published{};
-    std::uint64_t overlay_dropped{};
     std::string overlay_error;
 };
 
@@ -461,6 +453,16 @@ const char* CaptureStatusName(const std::uint32_t status) noexcept {
     }
 }
 
+std::uint32_t CaptureStatusCode(const NteOverlaySnapshot* snapshot) noexcept {
+    if (snapshot == nullptr) return ANOMALY_STATUS_V1_UNAVAILABLE;
+    if (snapshot->capture_status == "available") return ANOMALY_STATUS_V1_OK;
+    if (snapshot->capture_status == "permission_denied") {
+        return ANOMALY_STATUS_V1_PERMISSION_DENIED;
+    }
+    if (snapshot->capture_status == "unavailable") return ANOMALY_STATUS_V1_UNAVAILABLE;
+    return ANOMALY_STATUS_V1_FAILED;
+}
+
 NteOverlaySnapshot MakeOverlaySnapshot(
     Snapshot stats,
     const std::uint32_t service_status,
@@ -687,8 +689,11 @@ void Update(void* context, double) {
     if (!g_context.log_session.encounter_id.empty() &&
         g_context.engine.state() == EncounterState::Completed) {
         FinishEncounterLog("inactivity", MakeOverlaySnapshot(
-            g_context.engine.BuildSnapshot(now), g_context.render.service_status,
-            g_context.render.latest_sequence, g_context.log_session.report_id,
+            g_context.engine.BuildSnapshot(now),
+            CaptureStatusCode(g_context.render.snapshot.get()),
+            g_context.render.snapshot ?
+                g_context.render.snapshot->latest_damage_sequence : 0,
+            g_context.log_session.report_id,
             g_context.log_session.encounter_id, utc_ms, false,
             g_context.overlay_snapshot_sequence), now, utc_ms);
     }
@@ -716,8 +721,11 @@ void Update(void* context, double) {
     if (reset_requested) {
         if (!g_context.log_session.encounter_id.empty()) {
             FinishEncounterLog("manual_reset", MakeOverlaySnapshot(
-                g_context.engine.BuildSnapshot(now), g_context.render.service_status,
-                g_context.render.latest_sequence, g_context.log_session.report_id,
+                g_context.engine.BuildSnapshot(now),
+                CaptureStatusCode(g_context.render.snapshot.get()),
+                g_context.render.snapshot ?
+                    g_context.render.snapshot->latest_damage_sequence : 0,
+                g_context.log_session.report_id,
                 g_context.log_session.encounter_id, utc_ms, false,
                 g_context.overlay_snapshot_sequence), now, utc_ms);
         }
@@ -908,23 +916,16 @@ void Update(void* context, double) {
 
     RenderState next;
     Snapshot stats = g_context.engine.BuildSnapshot(now);
-    next.service_status = service_status;
-    next.latest_sequence = latest;
     if (g_context.log_worker) next.log = g_context.log_worker->Status();
     next.log_root = g_context.log_root.string();
-    next.report_id = g_context.log_session.report_id;
-    next.encounter_id = g_context.log_session.encounter_id;
-    PublishOverlay(stats, service_status, latest, next.report_id,
-        next.encounter_id, utc_ms, now);
+    const std::string report_id = g_context.log_session.report_id;
+    const std::string encounter_id = g_context.log_session.encounter_id;
+    PublishOverlay(stats, service_status, latest, report_id,
+        encounter_id, utc_ms, now);
     next.snapshot = std::make_shared<const NteOverlaySnapshot>(
         MakeOverlaySnapshot(std::move(stats), service_status, latest,
-            next.report_id, next.encounter_id, utc_ms, false,
+            report_id, encounter_id, utc_ms, false,
             g_context.overlay_snapshot_sequence));
-    next.websocket_port = g_context.overlay_server_info.port;
-    next.overlay_clients = g_context.overlay_server_info.connected_clients;
-    next.overlay_published = g_context.overlay_server_info.published_messages;
-    next.overlay_dropped = g_context.overlay_server_info.dropped_messages +
-        g_context.local_overlay_drops;
     next.overlay_error = g_context.overlay_error;
     std::scoped_lock lock(g_context.mutex);
     g_context.render = std::move(next);
@@ -997,6 +998,7 @@ void DrawPlayerTable(const AnomalyUiServiceV1* ui, const std::vector<nte::combat
 void DrawOverview(const AnomalyUiServiceV1* ui, const RenderState& render) {
     const Snapshot empty;
     const Snapshot& stats = render.snapshot ? render.snapshot->combat : empty;
+    const NteOverlaySnapshot* overlay = render.snapshot.get();
     TextFormat(ui, "状态：%s  持续：%.1f 秒  上场角色：%zu",
         StateName(stats.state), stats.duration_seconds, stats.controlled_character_count);
     TextFormat(ui, "输出：%lld  遭遇 DPS：%.1f  10秒 DPS：%.1f",
@@ -1010,13 +1012,15 @@ void DrawOverview(const AnomalyUiServiceV1* ui, const RenderState& render) {
         static_cast<unsigned long long>(stats.incoming_positive_hits),
         static_cast<unsigned long long>(stats.non_positive_events));
     TextFormat(ui, "HP：%.1f / %.1f  护盾：%.1f", stats.hp, stats.max_hp, stats.shield);
-    TextFormat(ui, "采集服务：%s  最新序列：%llu", StatusName(render.service_status),
-        static_cast<unsigned long long>(render.latest_sequence));
+    TextFormat(ui, "采集服务：%s  最新序列：%llu",
+        StatusName(CaptureStatusCode(overlay)),
+        static_cast<unsigned long long>(overlay ? overlay->latest_damage_sequence : 0));
     TextFormat(ui, "Overlay：127.0.0.1:%u  客户端：%u  发布：%llu  丢弃：%llu",
-        static_cast<unsigned>(render.websocket_port),
-        static_cast<unsigned>(render.overlay_clients),
-        static_cast<unsigned long long>(render.overlay_published),
-        static_cast<unsigned long long>(render.overlay_dropped));
+        static_cast<unsigned>(overlay ? overlay->websocket_port : 0),
+        static_cast<unsigned>(overlay ? overlay->connected_clients : 0),
+        static_cast<unsigned long long>(overlay ? overlay->published_messages : 0),
+        static_cast<unsigned long long>(
+            overlay ? overlay->transport_dropped_messages : 0));
     if (!render.overlay_error.empty()) {
         TextFormat(ui, "Overlay 启动错误：%s", render.overlay_error.c_str());
     }
@@ -1029,17 +1033,17 @@ void DrawOverview(const AnomalyUiServiceV1* ui, const RenderState& render) {
         render.log.running ? (render.log.ready ? "记录就绪" : "正在初始化") : "未运行",
         render.log.queue_depth,
         static_cast<unsigned long long>(render.log.dropped_events));
-    if (!render.report_id.empty()) {
+    if (overlay && !overlay->report_id.empty()) {
         std::uint64_t active_bytes{};
         for (const auto& report : render.log.history) {
-            if (report.report_id == render.report_id) {
+            if (report.report_id == overlay->report_id) {
                 active_bytes = report.total_bytes;
                 break;
             }
         }
         TextFormat(ui, "Report：%s  Encounter：%s",
-            render.report_id.c_str(), render.encounter_id.empty() ? "等待下一场" :
-            render.encounter_id.c_str());
+            overlay->report_id.c_str(), overlay->encounter_id.empty() ? "等待下一场" :
+            overlay->encounter_id.c_str());
         TextFormat(ui, "当前日志大小：%.2f MiB",
             static_cast<double>(active_bytes) / (1024.0 * 1024.0));
     }
@@ -1264,14 +1268,17 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void*, std::uint32_t) {
         render = g_context.render;
     }
     if (!g_context.producer_instance_id.empty()) {
-        PublishOverlay(g_context.engine.BuildSnapshot(now), render.service_status,
-            render.latest_sequence, g_context.log_session.report_id,
+        PublishOverlay(g_context.engine.BuildSnapshot(now),
+            CaptureStatusCode(render.snapshot.get()),
+            render.snapshot ? render.snapshot->latest_damage_sequence : 0,
+            g_context.log_session.report_id,
             g_context.log_session.encounter_id, utc_ms, now, true, true);
     }
     if (!g_context.log_session.encounter_id.empty()) {
         FinishEncounterLog("plugin_stop", MakeOverlaySnapshot(
-            g_context.engine.BuildSnapshot(now), render.service_status,
-            render.latest_sequence, g_context.log_session.report_id,
+            g_context.engine.BuildSnapshot(now), CaptureStatusCode(render.snapshot.get()),
+            render.snapshot ? render.snapshot->latest_damage_sequence : 0,
+            g_context.log_session.report_id,
             g_context.log_session.encounter_id, utc_ms, true,
             g_context.overlay_snapshot_sequence), now, utc_ms);
     }
