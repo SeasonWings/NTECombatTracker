@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -24,6 +25,8 @@ constexpr std::size_t kFlushEventCount = 128;
 constexpr std::size_t kSealEventCount = 1024;
 constexpr std::size_t kSealByteCount = 1024 * 1024;
 constexpr std::size_t kMaximumAggregateKeys = 16384;
+constexpr std::size_t kMaximumDictionaryEntries = 4096;
+constexpr std::size_t kMaximumHistoryEncounters = 100;
 constexpr std::uint32_t kCriticalFlag = 1U << 1U;
 constexpr std::uint32_t kHeadHitFlag = 1U << 2U;
 constexpr std::uint32_t kWeakFlag = 1U << 3U;
@@ -104,12 +107,16 @@ bool AtomicWrite(
             return false;
         }
     }
-    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_READ,
+    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE,
         FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file != INVALID_HANDLE_VALUE) {
-        static_cast<void>(FlushFileBuffers(file));
-        CloseHandle(file);
+    if (file == INVALID_HANDLE_VALUE || !FlushFileBuffers(file)) {
+        const DWORD flush_error = GetLastError();
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        error = "flush temporary file failed: " + std::to_string(flush_error);
+        std::filesystem::remove(temporary, filesystem_error);
+        return false;
     }
+    CloseHandle(file);
     if (!MoveFileExW(temporary.c_str(), path.c_str(),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         error = "atomic replace failed: " + std::to_string(GetLastError());
@@ -117,6 +124,36 @@ bool AtomicWrite(
         return false;
     }
     return true;
+}
+
+bool DurableAppend(
+    const std::filesystem::path& path,
+    const std::string_view content,
+    std::string& error) {
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        error = "open append file failed: " + std::to_string(GetLastError());
+        return false;
+    }
+    DWORD written{};
+    const bool ok = content.size() <= (std::numeric_limits<DWORD>::max)() &&
+        WriteFile(file, content.data(), static_cast<DWORD>(content.size()), &written, nullptr) &&
+        written == content.size() && FlushFileBuffers(file);
+    const DWORD append_error = ok ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(file);
+    if (!ok) {
+        error = "append file failed: " + std::to_string(append_error);
+        return false;
+    }
+    return true;
+}
+
+std::string JsonNumber(const double value) {
+    if (!std::isfinite(value)) return "null";
+    std::ostringstream result;
+    result << std::setprecision(17) << value;
+    return result.str();
 }
 
 std::optional<std::string> ReadFile(const std::filesystem::path& path) {
@@ -233,6 +270,38 @@ std::string Sha256(const std::string_view content) {
     return result.str();
 }
 
+std::string Sha256File(const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return Sha256("");
+    BCRYPT_ALG_HANDLE algorithm{};
+    BCRYPT_HASH_HANDLE hash{};
+    std::array<unsigned char, 32> digest{};
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0) {
+        return {};
+    }
+    NTSTATUS status = BCryptCreateHash(algorithm, &hash, nullptr, 0, nullptr, 0, 0);
+    std::array<char, 64 * 1024> buffer{};
+    while (status >= 0 && stream) {
+        stream.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto bytes = stream.gcount();
+        if (bytes > 0) {
+            status = BCryptHashData(hash, reinterpret_cast<PUCHAR>(buffer.data()),
+                static_cast<ULONG>(bytes), 0);
+        }
+    }
+    if (status >= 0) {
+        status = BCryptFinishHash(hash, digest.data(),
+            static_cast<ULONG>(digest.size()), 0);
+    }
+    if (hash != nullptr) BCryptDestroyHash(hash);
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (status < 0) return {};
+    std::ostringstream result;
+    result << std::hex << std::setfill('0');
+    for (const unsigned char byte : digest) result << std::setw(2) << static_cast<int>(byte);
+    return result.str();
+}
+
 std::string SegmentName(const std::size_t index) {
     std::ostringstream name;
     name << "events-" << std::setw(6) << std::setfill('0') << index << ".jsonl";
@@ -285,7 +354,6 @@ struct DamageLogRepository::Impl {
         std::string segment_content;
         std::string actors_content;
         std::string abilities_content;
-        std::string encounters_content;
         std::unordered_map<combat_stats::Handle, ActorEntry,
             combat_stats::HandleHash> actors;
         std::unordered_map<std::uint64_t, AbilityEntry> abilities;
@@ -297,6 +365,9 @@ struct DamageLogRepository::Impl {
         std::map<std::uint64_t, DamageAggregate> actor_target;
         std::map<std::uint64_t, DamageAggregate> ability_target;
         bool aggregate_truncated{};
+        bool actors_dirty{};
+        bool abilities_dirty{};
+        std::string write_error;
         ReportHistory history;
     };
 
@@ -305,6 +376,21 @@ struct DamageLogRepository::Impl {
     std::filesystem::path root;
     std::vector<ReportHistory> history;
     std::optional<ActiveReport> active;
+
+    void RefreshActiveBytes() {
+        if (!active) return;
+        std::error_code filesystem_error;
+        std::uint64_t total{};
+        for (const auto& file : std::filesystem::directory_iterator(
+                 active->directory, filesystem_error)) {
+            if (filesystem_error) break;
+            if (file.is_regular_file(filesystem_error) && !filesystem_error) {
+                total += file.file_size(filesystem_error);
+                if (filesystem_error) break;
+            }
+        }
+        if (!filesystem_error) active->history.total_bytes = total;
+    }
 
     static void AddAggregate(
         std::map<std::uint64_t, DamageAggregate>& rows,
@@ -382,6 +468,8 @@ struct DamageLogRepository::Impl {
             if (index != 0) json << ',';
             const auto& item = history[index];
             json << "{\"report_id\":" << Quoted(item.report_id)
+                 << ",\"world\":{\"id\":" << Decimal(item.world.id)
+                 << ",\"generation\":" << Decimal(item.world.generation) << '}'
                  << ",\"started_utc_ms\":" << item.started_utc_ms
                  << ",\"closed_utc_ms\":" << item.closed_utc_ms
                  << ",\"event_count\":" << Decimal(item.event_count)
@@ -393,6 +481,43 @@ struct DamageLogRepository::Impl {
         }
         json << "]}\n";
         return AtomicWrite(root / "catalog.json", json.str(), error);
+    }
+
+    static void RebuildActorsContent(ActiveReport& report) {
+        std::vector<const ActorEntry*> rows;
+        rows.reserve(report.actors.size());
+        for (const auto& [handle, actor] : report.actors) {
+            static_cast<void>(handle);
+            rows.push_back(&actor);
+        }
+        std::ranges::sort(rows, {}, &ActorEntry::actor_id);
+        report.actors_content.clear();
+        for (const ActorEntry* actor : rows) {
+            report.actors_content += "{\"schema_version\":1,\"actor_id\":" +
+                std::to_string(actor->actor_id) + ",\"handle\":{\"id\":" +
+                Decimal(actor->handle.id) + ",\"generation\":" +
+                Decimal(actor->handle.generation) + "},\"path\":" +
+                Quoted(actor->path) + ",\"resolution_status\":" +
+                Quoted(actor->path.starts_with("Unknown") ? "unknown" : "resolved") + "}\n";
+        }
+    }
+
+    static void RebuildAbilitiesContent(ActiveReport& report) {
+        std::vector<const AbilityEntry*> rows;
+        rows.reserve(report.abilities.size());
+        for (const auto& [source_id, ability] : report.abilities) {
+            static_cast<void>(source_id);
+            rows.push_back(&ability);
+        }
+        std::ranges::sort(rows, {}, &AbilityEntry::ability_id);
+        report.abilities_content.clear();
+        for (const AbilityEntry* ability : rows) {
+            report.abilities_content += "{\"schema_version\":1,\"ability_id\":" +
+                std::to_string(ability->ability_id) + ",\"source_id\":" +
+                Decimal(ability->source_id) + ",\"name\":" +
+                Quoted(ability->name) + ",\"resolution_status\":" +
+                Quoted(ability->name.starts_with("Unknown") ? "unknown" : "resolved") + "}\n";
+        }
     }
 
     bool WriteReport(std::string& error) const {
@@ -417,6 +542,7 @@ struct DamageLogRepository::Impl {
              << ",\"encounter_count\":" << Decimal(history_item.encounter_count)
              << ",\"open\":" << (history_item.open ? "true" : "false")
              << ",\"complete\":" << (history_item.complete ? "true" : "false")
+             << ",\"write_error\":" << Quoted(report.write_error)
              << ",\"close_reason\":" << Quoted(history_item.close_reason) << "}\n";
         return AtomicWrite(report.directory / "report.json", json.str(), error);
     }
@@ -427,33 +553,51 @@ struct DamageLogRepository::Impl {
         if (const auto found = report.actors.find(handle); found != report.actors.end()) {
             if (found->second.path.starts_with("Unknown") && !path.starts_with("Unknown")) {
                 found->second.path = path;
+                report.actors_dirty = true;
             }
-            return found->second.actor_id;
+            if (report.actors_dirty) RebuildActorsContent(report);
+            if (report.actors_dirty && AtomicWrite(report.directory / "actors.jsonl",
+                    report.actors_content, error)) report.actors_dirty = false;
+            return report.actors_dirty ? 0 : found->second.actor_id;
+        }
+        if (report.actors.size() >= kMaximumDictionaryEntries) {
+            report.aggregate_truncated = true;
+            return 0;
         }
         const std::uint32_t id = static_cast<std::uint32_t>(report.actors.size() + 1);
         report.actors.emplace(handle, ActorEntry{id, handle, path});
-        report.actors_content += "{\"schema_version\":1,\"actor_id\":" +
-            std::to_string(id) + ",\"handle\":{\"id\":" + Decimal(handle.id) +
-            ",\"generation\":" + Decimal(handle.generation) + "},\"path\":" +
-            Quoted(path) + "}\n";
-        static_cast<void>(AtomicWrite(report.directory / "actors.jsonl",
-            report.actors_content, error));
-        return id;
+        report.actors_dirty = true;
+        RebuildActorsContent(report);
+        if (AtomicWrite(report.directory / "actors.jsonl",
+                report.actors_content, error)) report.actors_dirty = false;
+        return report.actors_dirty ? 0 : id;
     }
 
     std::uint32_t AbilityId(const std::uint64_t source_id, const std::string& name,
         std::string& error) {
         auto& report = *active;
         if (const auto found = report.abilities.find(source_id);
-            found != report.abilities.end()) return found->second.ability_id;
+            found != report.abilities.end()) {
+            if (found->second.name.starts_with("Unknown") && !name.starts_with("Unknown")) {
+                found->second.name = name;
+                report.abilities_dirty = true;
+            }
+            if (report.abilities_dirty) RebuildAbilitiesContent(report);
+            if (report.abilities_dirty && AtomicWrite(report.directory / "abilities.jsonl",
+                    report.abilities_content, error)) report.abilities_dirty = false;
+            return report.abilities_dirty ? 0 : found->second.ability_id;
+        }
+        if (report.abilities.size() >= kMaximumDictionaryEntries) {
+            report.aggregate_truncated = true;
+            return 0;
+        }
         const std::uint32_t id = static_cast<std::uint32_t>(report.abilities.size() + 1);
         report.abilities.emplace(source_id, AbilityEntry{id, source_id, name});
-        report.abilities_content += "{\"schema_version\":1,\"ability_id\":" +
-            std::to_string(id) + ",\"source_id\":" + Decimal(source_id) +
-            ",\"name\":" + Quoted(name) + "}\n";
-        static_cast<void>(AtomicWrite(report.directory / "abilities.jsonl",
-            report.abilities_content, error));
-        return id;
+        report.abilities_dirty = true;
+        RebuildAbilitiesContent(report);
+        if (AtomicWrite(report.directory / "abilities.jsonl",
+                report.abilities_content, error)) report.abilities_dirty = false;
+        return report.abilities_dirty ? 0 : id;
     }
 
     bool FlushSegment(std::string& error) {
@@ -490,7 +634,15 @@ struct DamageLogRepository::Impl {
                  << ",\"sha256\":" << Quoted(active_hash)
                  << ",\"sealed\":false}";
         }
-        json << "],\"content_sha256\":" << Quoted(Sha256(content_hash_input)) << "}\n";
+        content_hash_input += Sha256(active->actors_content);
+        content_hash_input += Sha256(active->abilities_content);
+        const std::string encounters_hash = Sha256File(
+            active->directory / "encounters.jsonl");
+        content_hash_input += encounters_hash;
+        json << "],\"actors_sha256\":" << Quoted(Sha256(active->actors_content))
+             << ",\"abilities_sha256\":" << Quoted(Sha256(active->abilities_content))
+             << ",\"encounters_sha256\":" << Quoted(encounters_hash)
+             << ",\"content_sha256\":" << Quoted(Sha256(content_hash_input)) << "}\n";
         return AtomicWrite(active->directory / "index.json", json.str(), error);
     }
 
@@ -531,6 +683,8 @@ bool DamageLogRepository::Recover(std::string& error) {
         ReportHistory item;
         item.report_id = ExtractString(*content, "report_id").value_or("");
         if (!IsUuid(item.report_id)) continue;
+        item.world.id = ExtractUnsigned(*content, "id");
+        item.world.generation = ExtractUnsigned(*content, "generation");
         item.started_utc_ms = ExtractSigned(*content, "started_utc_ms");
         item.closed_utc_ms = ExtractSigned(*content, "closed_utc_ms");
         item.event_count = ExtractUnsigned(*content, "event_count");
@@ -589,6 +743,7 @@ bool DamageLogRepository::BeginReport(const ReportOpen& report, std::string& err
     active.open = report;
     active.directory = impl_->root / "reports" / report.report_id;
     active.history.report_id = report.report_id;
+    active.history.world = report.world;
     active.history.started_utc_ms = report.started_utc_ms;
     active.history.open = true;
     std::error_code filesystem_error;
@@ -633,12 +788,16 @@ bool DamageLogRepository::Append(const LoggedDamage& damage, std::string& error)
         return false;
     }
     auto& report = *impl_->active;
+    error.clear();
     const std::uint32_t attacker_id = impl_->ActorId(
         damage.event.attacker, damage.event.attacker_name, error);
+    if (!error.empty()) return false;
     const std::uint32_t victim_id = impl_->ActorId(
         damage.event.victim, damage.event.victim_name, error);
+    if (!error.empty()) return false;
     const std::uint32_t ability_id = impl_->AbilityId(
         damage.event.source_id, damage.event.source_name, error);
+    if (!error.empty()) return false;
     if (damage.event.final_damage > 0) {
         Impl::AddAggregate(report.actor_outgoing, attacker_id, damage,
             report.aggregate_truncated);
@@ -667,6 +826,9 @@ bool DamageLogRepository::Append(const LoggedDamage& damage, std::string& error)
          << ",\"received_offset_us\":" << Decimal(damage.received_offset_us)
          << ",\"timestamp_basis\":\"client_receive\""
          << ",\"flags\":" << damage.event.flags
+         << ",\"critical\":" << ((damage.event.flags & kCriticalFlag) != 0 ? "true" : "false")
+         << ",\"head_hit\":" << ((damage.event.flags & kHeadHitFlag) != 0 ? "true" : "false")
+         << ",\"weak_unbalance\":" << ((damage.event.flags & kWeakFlag) != 0 ? "true" : "false")
          << ",\"player_related\":" << (damage.player_related ? "true" : "false")
          << ",\"world\":{\"id\":" << Decimal(damage.event.world.id)
          << ",\"generation\":" << Decimal(damage.event.world.generation) << '}'
@@ -682,8 +844,9 @@ bool DamageLogRepository::Append(const LoggedDamage& damage, std::string& error)
          << ",\"display_damage\":" << Decimal(damage.event.display_damage)
          << ",\"basic_damage\":" << Decimal(damage.event.basic_damage)
          << ",\"final_damage\":" << Decimal(damage.event.final_damage)
-         << ",\"hit_location\":[" << damage.event.hit_location[0] << ','
-         << damage.event.hit_location[1] << ',' << damage.event.hit_location[2] << ']'
+         << ",\"hit_location\":[" << JsonNumber(damage.event.hit_location[0]) << ','
+         << JsonNumber(damage.event.hit_location[1]) << ','
+         << JsonNumber(damage.event.hit_location[2]) << ']'
          << ",\"damage_type\":" << damage.event.damage_type
          << ",\"display_type\":" << damage.event.display_type
          << ",\"reaction_type\":" << damage.event.reaction_type
@@ -711,6 +874,7 @@ bool DamageLogRepository::Append(const LoggedDamage& damage, std::string& error)
 bool DamageLogRepository::Flush(std::string& error) {
     if (!impl_->FlushSegment(error)) return false;
     if (!impl_->active) return true;
+    impl_->RefreshActiveBytes();
     impl_->history.front() = impl_->active->history;
     return impl_->WriteReport(error) && impl_->WriteIndex(error) &&
         impl_->WriteCatalog(error);
@@ -733,7 +897,8 @@ bool DamageLogRepository::EndEncounter(
               : 0.0);
     const bool complete = !encounter.quality.partial && !encounter.quality.overflow &&
         !encounter.quality.cursor_gap && !report.aggregate_truncated &&
-        encounter.dropped_events == 0;
+        encounter.dropped_events == 0 && encounter.write_error.empty() &&
+        encounter.service_unavailable_intervals.empty();
     const auto encounter_duration_us = static_cast<std::uint64_t>(
         (std::max)(0.0, duration) * 1'000'000.0);
     std::ostringstream line;
@@ -741,17 +906,35 @@ bool DamageLogRepository::EndEncounter(
          << ",\"encounter_id\":" << Quoted(encounter.encounter_id)
          << ",\"started_utc_ms\":" << opened.started_utc_ms
          << ",\"closed_utc_ms\":" << encounter.closed_utc_ms
-         << ",\"duration_seconds\":" << duration
+         << ",\"duration_seconds\":" << JsonNumber(duration)
          << ",\"end_reason\":" << Quoted(encounter.reason)
          << ",\"outgoing_damage\":" << Decimal(encounter.outgoing_damage)
          << ",\"incoming_damage\":" << Decimal(encounter.incoming_damage)
-         << ",\"encounter_dps\":" << encounter.encounter_dps
+         << ",\"encounter_dps\":" << JsonNumber(encounter.encounter_dps)
          << ",\"event_count\":" << Decimal(report.encounter_event_count)
          << ",\"first_sequence\":" << Decimal(report.encounter_first_sequence)
          << ",\"last_sequence\":" << Decimal(report.encounter_last_sequence)
          << ",\"dropped_events\":" << Decimal(encounter.dropped_events)
          << ",\"dropped_first_sequence\":" << Decimal(encounter.dropped_first_sequence)
          << ",\"dropped_last_sequence\":" << Decimal(encounter.dropped_last_sequence)
+         << ",\"write_error\":" << Quoted(encounter.write_error)
+         << ",\"service_unavailable_intervals\":[";
+    for (std::size_t index{}; index < encounter.service_unavailable_intervals.size(); ++index) {
+        if (index != 0) line << ',';
+        line << "{\"start_offset_us\":"
+             << Decimal(encounter.service_unavailable_intervals[index].first)
+             << ",\"end_offset_us\":"
+             << Decimal(encounter.service_unavailable_intervals[index].second) << '}';
+    }
+    line << ']'
+         << ",\"missing_sequence_ranges\":[";
+    for (std::size_t index{}; index < encounter.missing_sequence_ranges.size(); ++index) {
+        if (index != 0) line << ',';
+        line << "{\"first\":" << Decimal(encounter.missing_sequence_ranges[index].first)
+             << ",\"last\":" << Decimal(encounter.missing_sequence_ranges[index].second)
+             << '}';
+    }
+    line << ']'
          << ",\"complete\":" << (complete ? "true" : "false")
          << ",\"quality\":{\"partial\":" << (encounter.quality.partial ? "true" : "false")
          << ",\"overflow\":" << (encounter.quality.overflow ? "true" : "false")
@@ -783,15 +966,17 @@ bool DamageLogRepository::EndEncounter(
     Impl::WriteAggregateArray(line, report.ability_target, encounter_duration_us,
         composite_ids("ability_id", "target_actor_id"));
     line << "}\n";
-    report.encounters_content += line.str();
-    if (!AtomicWrite(report.directory / "encounters.jsonl",
-            report.encounters_content, error)) return false;
+    if (!DurableAppend(report.directory / "encounters.jsonl", line.str(), error)) return false;
     ++report.encounter_count;
     report.history.encounter_count = report.encounter_count;
     report.history.encounters.push_back({encounter.encounter_id, encounter.reason,
         duration, encounter.outgoing_damage, encounter.incoming_damage,
         encounter.encounter_dps, complete});
+    if (report.history.encounters.size() > kMaximumHistoryEncounters) {
+        report.history.encounters.erase(report.history.encounters.begin());
+    }
     if (!complete) report.history.complete = false;
+    impl_->RefreshActiveBytes();
     impl_->history.front() = report.history;
     report.encounter.reset();
     return impl_->FlushSegment(error) && impl_->WriteReport(error) && impl_->WriteCatalog(error);
@@ -807,7 +992,9 @@ bool DamageLogRepository::CloseReport(const ReportClose& close, std::string& err
     report.history.open = false;
     report.history.closed_utc_ms = close.closed_utc_ms;
     report.history.close_reason = close.unclean_shutdown ? "unclean_shutdown" : close.reason;
-    report.history.complete = report.history.complete && !close.unclean_shutdown;
+    report.history.complete = report.history.complete && !close.unclean_shutdown &&
+        !close.incomplete;
+    report.write_error = close.write_error;
     impl_->history.front() = report.history;
     if (!impl_->WriteReport(error) || !impl_->WriteIndex(error)) return false;
     std::error_code filesystem_error;
@@ -883,7 +1070,8 @@ bool DamageLogRepository::DeleteReport(const std::string& report_id, std::string
 }
 
 std::vector<ReportHistory> DamageLogRepository::History() const {
-    return impl_->history;
+    const std::size_t count = (std::min<std::size_t>)(50, impl_->history.size());
+    return {impl_->history.begin(), impl_->history.begin() + count};
 }
 
 bool DamageLogRepository::HasOpenReport() const noexcept {

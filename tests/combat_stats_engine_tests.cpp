@@ -218,6 +218,20 @@ void EncounterAndRollingDps() {
     Check(snapshot.duration_seconds == 1.0, "completed encounter duration should stop at last activity");
 }
 
+void EncounterDpsUsesPlayerActivityWindow() {
+    CombatStatsEngine engine;
+    const TimePoint start{450s};
+    const Handle world{55, 1};
+    const Handle player{56, 1};
+    engine.ObserveCombatant(Combatant{world, player, 100.0, 100.0, 0.0}, start);
+    engine.AcceptDamage(Outgoing(1, world, player, 100), start);
+    auto activity = Outgoing(2, world, player, 0);
+    engine.AcceptDamage(activity, start + 5s);
+    const auto snapshot = engine.BuildSnapshot(start + 5s);
+    Check(snapshot.encounter_dps == 20.0,
+          "encounter DPS should use trigger-to-last-player-activity duration");
+}
+
 void AggregatesAndQualityFlags() {
     CombatStatsEngine engine;
     const TimePoint start{500s};
@@ -390,6 +404,7 @@ int main() {
     EncounterLifecycleAndCharacterRotation();
     DirectionAndNonPositiveRules();
     EncounterAndRollingDps();
+    EncounterDpsUsesPlayerActivityWindow();
     AggregatesAndQualityFlags();
     AggregateLimitUsesOtherBucket();
     DamageTotalsSaturateOnOverflow();

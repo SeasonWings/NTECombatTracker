@@ -75,9 +75,10 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
         Check(repository.Append(LoggedDamage{
                   event, 1'700'000'000'200, 200'000, true}, error),
               "damage should append");
-        Check(repository.EndEncounter(EncounterClose{
-                  encounter_id, "inactivity", 1'700'000'010'100, 10'100'000,
-                  100, 0, 10.0, 10.0, {}}, error),
+        EncounterClose close{encounter_id, "inactivity",
+            1'700'000'010'100, 10'100'000, 100, 0, 10.0, 10.0, {}};
+        close.service_unavailable_intervals.emplace_back(3'000'000, 4'000'000);
+        Check(repository.EndEncounter(close, error),
               "encounter should close");
         Check(repository.CloseReport(ReportClose{
                   "plugin_stop", 1'700'000'010'200, false}, error),
@@ -92,6 +93,11 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
     Check(std::filesystem::exists(report_path / "encounters.jsonl"), "encounter summary should exist");
     Check(std::filesystem::exists(report_path / "events-000001.jsonl"), "event segment should exist");
     Check(std::filesystem::exists(report_path / "index.json"), "segment index should exist");
+    const std::string report_index = ReadAll(report_path / "index.json");
+    Check(report_index.find("\"actors_sha256\":\"") != std::string::npos &&
+              report_index.find("\"abilities_sha256\":\"") != std::string::npos &&
+              report_index.find("\"encounters_sha256\":\"") != std::string::npos,
+          "report content hash should cover dictionaries and encounter summaries");
 
     const std::string events = ReadAll(report_path / "events-000001.jsonl");
     Check(events.find("\"sequence\":\"18446744073709551000\"") != std::string::npos,
@@ -110,6 +116,14 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
           "encounter summary should contain all participant aggregate dimensions");
     Check(encounters.find("\"critical_hits\":\"1\"") != std::string::npos,
           "encounter aggregates should retain critical hit counts");
+    Check(encounters.find("\"service_unavailable_intervals\":[{\"start_offset_us\":\"3000000\"") !=
+              std::string::npos && encounters.find("\"complete\":false") != std::string::npos,
+          "service gaps should be persisted and make the encounter incomplete");
+    Check(ReadAll(report_path / "actors.jsonl").find(
+              "\"resolution_status\":\"resolved\"") != std::string::npos &&
+          ReadAll(report_path / "abilities.jsonl").find(
+              "\"resolution_status\":\"resolved\"") != std::string::npos,
+          "actor and ability dictionaries should persist resolution state");
 
     DamageLogRepository reopened(root);
     std::string recover_error;
@@ -119,6 +133,8 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
     if (!history.empty()) {
         Check(history[0].report_id == report_id && !history[0].open,
               "history should preserve report identity and closed state");
+        Check(history[0].world == Handle{9, 2},
+              "history should preserve the report World identity");
         Check(history[0].encounter_count == 1 && history[0].event_count == 1,
               "history should expose encounter and event counts");
         Check(history[0].encounters.size() == 1 &&

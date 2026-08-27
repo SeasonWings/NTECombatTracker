@@ -13,8 +13,11 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <vector>
 
 namespace {
 
@@ -29,6 +32,14 @@ using nte::combat_stats::TimePoint;
 constexpr std::size_t kMaximumDrainPerUpdate = 256;
 constexpr std::size_t kMaximumResolvedNameBytes = 4096;
 constexpr std::size_t kMaximumRecentRows = 100;
+constexpr std::size_t kMaximumNameCacheEntries = 4096;
+constexpr std::size_t kMaximumServiceGapIntervals = 64;
+
+struct NameCacheEntry {
+    std::string value;
+    std::uint32_t attempts{};
+    std::uint64_t retry_after_sequence{};
+};
 
 struct RenderState {
     Snapshot stats;
@@ -48,6 +59,13 @@ struct LogSession {
     std::int64_t report_started_utc_ms{};
     std::int64_t encounter_started_utc_ms{};
     std::uint64_t encounter_started_offset_us{};
+    std::uint64_t dropped_events{};
+    std::uint64_t dropped_first_sequence{};
+    std::uint64_t dropped_last_sequence{};
+    std::optional<std::uint64_t> service_unavailable_started_us;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> service_unavailable_intervals;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> missing_sequence_ranges;
+    bool service_gap_truncated{};
 };
 
 struct Context {
@@ -58,6 +76,9 @@ struct Context {
     std::unique_ptr<nte::damage_log::DamageLogWorker> log_worker;
     std::filesystem::path log_root;
     LogSession log_session;
+    std::unordered_map<std::uint64_t, NameCacheEntry> source_names;
+    std::unordered_map<Handle, NameCacheEntry, nte::combat_stats::HandleHash>
+        participant_names;
     std::mutex mutex;
     RenderState render;
     bool reset_requested{};
@@ -124,6 +145,53 @@ std::string ResolveParticipant(
             return service->participant_path_utf8(
                 service->user, participant, destination, size);
         }, "Unknown participant");
+}
+
+std::string ResolveSourceCached(
+    const AnomalyNteCombatServiceV1* service,
+    const std::uint64_t source_id,
+    const std::uint64_t sequence) {
+    if (source_id == 0) return "Unknown source";
+    auto found = g_context.source_names.find(source_id);
+    if (found != g_context.source_names.end()) {
+        if (!found->second.value.empty()) return found->second.value;
+        if (found->second.attempts >= 3 || sequence < found->second.retry_after_sequence) {
+            return "Unknown source";
+        }
+    } else if (g_context.source_names.size() >= kMaximumNameCacheEntries) {
+        return ResolveSource(service, source_id);
+    } else {
+        found = g_context.source_names.emplace(source_id, NameCacheEntry{}).first;
+    }
+    const std::string resolved = ResolveSource(service, source_id);
+    if (!resolved.starts_with("Unknown")) found->second.value = resolved;
+    ++found->second.attempts;
+    found->second.retry_after_sequence = sequence + 64;
+    return resolved;
+}
+
+std::string ResolveParticipantCached(
+    const AnomalyNteCombatServiceV1* service,
+    const AnomalyGenerationHandleV1 participant,
+    const std::uint64_t sequence) {
+    const Handle handle = ConvertHandle(participant);
+    if (handle.id == 0) return "Unknown participant";
+    auto found = g_context.participant_names.find(handle);
+    if (found != g_context.participant_names.end()) {
+        if (!found->second.value.empty()) return found->second.value;
+        if (found->second.attempts >= 3 || sequence < found->second.retry_after_sequence) {
+            return "Unknown participant";
+        }
+    } else if (g_context.participant_names.size() >= kMaximumNameCacheEntries) {
+        return ResolveParticipant(service, participant);
+    } else {
+        found = g_context.participant_names.emplace(handle, NameCacheEntry{}).first;
+    }
+    const std::string resolved = ResolveParticipant(service, participant);
+    if (!resolved.starts_with("Unknown")) found->second.value = resolved;
+    ++found->second.attempts;
+    found->second.retry_after_sequence = sequence + 64;
+    return resolved;
 }
 
 std::string ShortName(const std::string& path) {
@@ -205,6 +273,13 @@ bool OpenEncounterLog(
     if (session.encounter_id.empty()) return false;
     session.encounter_started_utc_ms = utc_ms;
     session.encounter_started_offset_us = ReportOffsetMicroseconds(now);
+    session.dropped_events = 0;
+    session.dropped_first_sequence = 0;
+    session.dropped_last_sequence = 0;
+    session.service_unavailable_started_us.reset();
+    session.service_unavailable_intervals.clear();
+    session.missing_sequence_ranges.clear();
+    session.service_gap_truncated = false;
     return g_context.log_worker->Submit(nte::damage_log::EncounterOpen{
         session.encounter_id, utc_ms, session.encounter_started_offset_us});
 }
@@ -217,17 +292,55 @@ void FinishEncounterLog(
     auto& session = g_context.log_session;
     if (!g_context.log_worker || session.encounter_id.empty()) return;
     auto quality = snapshot.quality;
-    const auto worker_status = g_context.log_worker->Status();
-    if (worker_status.dropped_events != 0) quality.partial = true;
+    const std::uint64_t closed_offset_us = ReportOffsetMicroseconds(now);
+    if (session.service_unavailable_started_us) {
+        if (session.service_unavailable_intervals.size() < kMaximumServiceGapIntervals) {
+            session.service_unavailable_intervals.emplace_back(
+                *session.service_unavailable_started_us, closed_offset_us);
+        } else {
+            session.service_gap_truncated = true;
+        }
+        session.service_unavailable_started_us.reset();
+    }
+    if (session.dropped_events != 0 || !session.service_unavailable_intervals.empty() ||
+        session.service_gap_truncated) quality.partial = true;
     static_cast<void>(g_context.log_worker->Submit(nte::damage_log::EncounterClose{
-        session.encounter_id, reason, utc_ms, ReportOffsetMicroseconds(now),
+        session.encounter_id, reason, utc_ms, closed_offset_us,
         snapshot.outgoing_damage, snapshot.incoming_damage,
         snapshot.encounter_dps, snapshot.duration_seconds, quality,
-        worker_status.dropped_events, worker_status.dropped_first_sequence,
-        worker_status.dropped_last_sequence}));
+        session.dropped_events, session.dropped_first_sequence,
+        session.dropped_last_sequence, {}, session.service_unavailable_intervals,
+        session.missing_sequence_ranges}));
     session.encounter_id.clear();
     session.encounter_started_utc_ms = 0;
     session.encounter_started_offset_us = 0;
+    session.dropped_events = 0;
+    session.dropped_first_sequence = 0;
+    session.dropped_last_sequence = 0;
+    session.service_unavailable_started_us.reset();
+    session.service_unavailable_intervals.clear();
+    session.missing_sequence_ranges.clear();
+    session.service_gap_truncated = false;
+}
+
+void UpdateServiceGap(const bool available, const TimePoint now) {
+    auto& session = g_context.log_session;
+    if (session.encounter_id.empty()) return;
+    const std::uint64_t offset = ReportOffsetMicroseconds(now);
+    if (!available) {
+        if (!session.service_unavailable_started_us) {
+            session.service_unavailable_started_us = offset;
+        }
+        return;
+    }
+    if (!session.service_unavailable_started_us) return;
+    if (session.service_unavailable_intervals.size() < kMaximumServiceGapIntervals) {
+        session.service_unavailable_intervals.emplace_back(
+            *session.service_unavailable_started_us, offset);
+    } else {
+        session.service_gap_truncated = true;
+    }
+    session.service_unavailable_started_us.reset();
 }
 
 void FinishReportLog(const char* reason, const std::int64_t utc_ms) {
@@ -237,12 +350,16 @@ void FinishReportLog(const char* reason, const std::int64_t utc_ms) {
             nte::damage_log::ReportClose{reason, utc_ms, false}));
     }
     session = {};
+    g_context.source_names.clear();
+    g_context.participant_names.clear();
 }
 
 void ResetState() {
     g_context.engine.Reset();
     g_context.cursor.Clear();
     g_context.log_session = {};
+    g_context.source_names.clear();
+    g_context.participant_names.clear();
     std::scoped_lock lock(g_context.mutex);
     g_context.render = {};
     g_context.reset_requested = false;
@@ -377,15 +494,33 @@ void Update(void* context, double) {
                     }
                     normalized.received_utc_ms = utc_ms;
                     normalized.received_offset_us = ReportOffsetMicroseconds(now);
-                    normalized.source_name = ResolveSource(combat.get(), event.source_id);
-                    normalized.attacker_name = ResolveParticipant(combat.get(), event.attacker);
-                    normalized.victim_name = ResolveParticipant(combat.get(), event.victim);
+                    normalized.source_name = ResolveSourceCached(
+                        combat.get(), event.source_id, event.sequence);
+                    normalized.attacker_name = ResolveParticipantCached(
+                        combat.get(), event.attacker, event.sequence);
+                    normalized.victim_name = ResolveParticipantCached(
+                        combat.get(), event.victim, event.sequence);
                     if (g_context.engine.AcceptDamage(normalized, now) &&
                         g_context.log_worker &&
                         !g_context.log_session.encounter_id.empty() &&
                         !g_context.log_worker->Submit(nte::damage_log::LoggedDamage{
                             normalized, utc_ms, normalized.received_offset_us,
                             player_related})) {
+                        auto& session = g_context.log_session;
+                        ++session.dropped_events;
+                        if (session.dropped_first_sequence == 0) {
+                            session.dropped_first_sequence = normalized.sequence;
+                        }
+                        session.dropped_last_sequence = normalized.sequence;
+                        if (!session.missing_sequence_ranges.empty() &&
+                            session.missing_sequence_ranges.back().second + 1 ==
+                                normalized.sequence) {
+                            session.missing_sequence_ranges.back().second = normalized.sequence;
+                        } else if (session.missing_sequence_ranges.size() <
+                            kMaximumServiceGapIntervals) {
+                            session.missing_sequence_ranges.emplace_back(
+                                normalized.sequence, normalized.sequence);
+                        }
                         g_context.engine.MarkPartial(false);
                         g_context.engine.MarkOverflow();
                     }
@@ -407,6 +542,8 @@ void Update(void* context, double) {
     } else {
         static_cast<void>(g_context.cursor.BeginFrame(std::nullopt));
     }
+
+    UpdateServiceGap(service_status == ANOMALY_STATUS_V1_OK, now);
 
     RenderState next;
     next.stats = g_context.engine.BuildSnapshot(now);
@@ -519,8 +656,11 @@ void DrawHistory(const AnomalyUiServiceV1* ui, const RenderState& render) {
     for (std::size_t index{}; index < count; ++index) {
         const auto& report = render.log.history[index];
         TextFormat(ui,
-            "Report %s  开始：%lld  %s  遭遇：%llu  事件：%llu  %.2f MiB  %s",
-            report.report_id.c_str(), static_cast<long long>(report.started_utc_ms),
+            "Report %s  World %llu:%llu  开始：%lld  %s  遭遇：%llu  事件：%llu  %.2f MiB  %s",
+            report.report_id.c_str(),
+            static_cast<unsigned long long>(report.world.id),
+            static_cast<unsigned long long>(report.world.generation),
+            static_cast<long long>(report.started_utc_ms),
             report.open ? "OPEN" : report.close_reason.c_str(),
             static_cast<unsigned long long>(report.encounter_count),
             static_cast<unsigned long long>(report.event_count),

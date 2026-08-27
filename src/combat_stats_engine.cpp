@@ -262,7 +262,7 @@ Snapshot CombatStatsEngine::BuildSnapshot(const TimePoint now) const {
     }
     if (outgoing_positive_hits_ != 0) {
         const double seconds = (std::max)(1.0, std::chrono::duration<double>(
-            last_positive_outgoing_ - first_positive_outgoing_).count());
+            last_activity_ - encounter_started_).count());
         snapshot.encounter_dps = static_cast<double>(outgoing_damage_) / seconds;
     }
     long double rolling_damage{};

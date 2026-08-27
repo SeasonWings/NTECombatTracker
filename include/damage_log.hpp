@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace nte::damage_log {
@@ -48,12 +49,17 @@ struct EncounterClose {
     std::uint64_t dropped_events{};
     std::uint64_t dropped_first_sequence{};
     std::uint64_t dropped_last_sequence{};
+    std::string write_error;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> service_unavailable_intervals;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> missing_sequence_ranges;
 };
 
 struct ReportClose {
     std::string reason;
     std::int64_t closed_utc_ms{};
     bool unclean_shutdown{};
+    bool incomplete{};
+    std::string write_error;
 };
 
 struct EncounterHistory {
@@ -68,6 +74,7 @@ struct EncounterHistory {
 
 struct ReportHistory {
     std::string report_id;
+    combat_stats::Handle world;
     std::int64_t started_utc_ms{};
     std::int64_t closed_utc_ms{};
     std::uint64_t event_count{};

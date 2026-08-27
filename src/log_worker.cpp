@@ -5,6 +5,7 @@
 #include <shlobj.h>
 
 #include <array>
+#include <algorithm>
 #include <condition_variable>
 #include <deque>
 #include <iomanip>
@@ -75,6 +76,13 @@ struct DamageLogWorker::Impl {
             status.history = repository.History();
         }
         auto last_flush = std::chrono::steady_clock::now();
+        bool pending_write_failure{};
+        std::string pending_write_error;
+        std::uint64_t encounter_failed_events{};
+        std::uint64_t encounter_failed_first_sequence{};
+        std::uint64_t encounter_failed_last_sequence{};
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> encounter_failed_ranges;
+        std::string encounter_write_error;
         for (;;) {
             Command command;
             bool has_command{};
@@ -96,20 +104,69 @@ struct DamageLogWorker::Impl {
             bool succeeded = true;
             error.clear();
             bool refresh_history{};
+            bool reset_drop_status{};
             if (has_command) {
-                std::visit([&](const auto& value) {
+                std::visit([&](auto& value) {
                     using Value = std::decay_t<decltype(value)>;
                     if constexpr (std::is_same_v<Value, ReportOpen>) {
                         succeeded = repository.BeginReport(value, error);
+                        if (succeeded) {
+                            pending_write_failure = false;
+                            pending_write_error.clear();
+                        }
+                        reset_drop_status = succeeded;
                         refresh_history = true;
                     } else if constexpr (std::is_same_v<Value, EncounterOpen>) {
                         succeeded = repository.BeginEncounter(value, error);
+                        if (succeeded) {
+                            encounter_failed_events = 0;
+                            encounter_failed_first_sequence = 0;
+                            encounter_failed_last_sequence = 0;
+                            encounter_failed_ranges.clear();
+                            encounter_write_error.clear();
+                        }
                     } else if constexpr (std::is_same_v<Value, LoggedDamage>) {
                         succeeded = repository.Append(value, error);
+                        if (!succeeded) {
+                            ++encounter_failed_events;
+                            if (encounter_failed_first_sequence == 0) {
+                                encounter_failed_first_sequence = value.event.sequence;
+                            }
+                            encounter_failed_last_sequence = value.event.sequence;
+                            if (!encounter_failed_ranges.empty() &&
+                                encounter_failed_ranges.back().second + 1 == value.event.sequence) {
+                                encounter_failed_ranges.back().second = value.event.sequence;
+                            } else if (encounter_failed_ranges.size() < 64) {
+                                encounter_failed_ranges.emplace_back(
+                                    value.event.sequence, value.event.sequence);
+                            }
+                            encounter_write_error = error.empty() ? "event write failed" : error;
+                        }
                     } else if constexpr (std::is_same_v<Value, EncounterClose>) {
+                        if (pending_write_failure || encounter_failed_events != 0) {
+                            value.quality.partial = true;
+                            value.dropped_events += encounter_failed_events;
+                            if (value.dropped_first_sequence == 0) {
+                                value.dropped_first_sequence = encounter_failed_first_sequence;
+                            }
+                            value.dropped_last_sequence = (std::max)(
+                                value.dropped_last_sequence, encounter_failed_last_sequence);
+                            value.missing_sequence_ranges.insert(
+                                value.missing_sequence_ranges.end(),
+                                encounter_failed_ranges.begin(), encounter_failed_ranges.end());
+                            if (value.write_error.empty()) {
+                                value.write_error = encounter_write_error.empty()
+                                    ? pending_write_error : encounter_write_error;
+                            }
+                        }
                         succeeded = repository.EndEncounter(value, error);
+                        if (succeeded) pending_write_failure = false;
                         refresh_history = true;
                     } else if constexpr (std::is_same_v<Value, ReportClose>) {
+                        if (pending_write_failure) {
+                            value.incomplete = true;
+                            if (value.write_error.empty()) value.write_error = pending_write_error;
+                        }
                         succeeded = repository.CloseReport(value, error);
                         refresh_history = true;
                     } else if constexpr (std::is_same_v<Value, DeleteCommand>) {
@@ -129,7 +186,17 @@ struct DamageLogWorker::Impl {
                 last_flush = now;
             }
             std::scoped_lock lock(mutex);
-            if (!succeeded) status.last_error = error.empty() ? "log write failed" : error;
+            if (reset_drop_status) {
+                status.dropped_events = 0;
+                status.dropped_first_sequence = 0;
+                status.dropped_last_sequence = 0;
+                status.last_error.clear();
+            }
+            if (!succeeded) {
+                pending_write_failure = true;
+                pending_write_error = error.empty() ? "log write failed" : error;
+                status.last_error = pending_write_error;
+            }
             if (refresh_history) status.history = repository.History();
         }
         std::string flush_error;
