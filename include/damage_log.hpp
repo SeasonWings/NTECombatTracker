@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -52,6 +53,9 @@ struct EncounterClose {
     std::string write_error;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> service_unavailable_intervals;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> missing_sequence_ranges;
+    std::optional<std::uint64_t> open_missing_sequence_start;
+    bool service_intervals_truncated{};
+    bool missing_ranges_truncated{};
 };
 
 struct ReportClose {

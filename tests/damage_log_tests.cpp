@@ -49,6 +49,9 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
         Check(repository.BeginReport(ReportOpen{
                   report_id, Handle{9, 2}, 1'700'000'000'000, "nte-build-test"}, error),
               "report should open");
+        std::string active_delete_error;
+        Check(!repository.DeleteReport(report_id, active_delete_error),
+              "an active report must not be deleted");
         Check(repository.BeginEncounter(EncounterOpen{
                   encounter_id, 1'700'000'000'100, 100'000}, error),
               "encounter should open");
@@ -78,6 +81,9 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
         EncounterClose close{encounter_id, "inactivity",
             1'700'000'010'100, 10'100'000, 100, 0, 10.0, 10.0, {}};
         close.service_unavailable_intervals.emplace_back(3'000'000, 4'000'000);
+        close.missing_sequence_ranges.emplace_back(92, 94);
+        close.open_missing_sequence_start = 95;
+        close.service_intervals_truncated = true;
         Check(repository.EndEncounter(close, error),
               "encounter should close");
         Check(repository.CloseReport(ReportClose{
@@ -119,11 +125,24 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
     Check(encounters.find("\"service_unavailable_intervals\":[{\"start_offset_us\":\"3000000\"") !=
               std::string::npos && encounters.find("\"complete\":false") != std::string::npos,
           "service gaps should be persisted and make the encounter incomplete");
+    Check(encounters.find("\"missing_sequence_ranges\":[{\"first\":\"92\",\"last\":\"94\"}]") !=
+              std::string::npos,
+          "missing sequence ranges should be persisted exactly");
+    Check(encounters.find("\"open_missing_sequence_start\":\"95\"") !=
+              std::string::npos &&
+          encounters.find("\"service_intervals_truncated\":true") !=
+              std::string::npos,
+          "open cursor gaps and truncated interval lists should be explicit");
     Check(ReadAll(report_path / "actors.jsonl").find(
               "\"resolution_status\":\"resolved\"") != std::string::npos &&
           ReadAll(report_path / "abilities.jsonl").find(
               "\"resolution_status\":\"resolved\"") != std::string::npos,
           "actor and ability dictionaries should persist resolution state");
+    Check(ReadAll(report_path / "actors.jsonl").find(
+              "\"actor_id\":0") != std::string::npos &&
+          ReadAll(report_path / "abilities.jsonl").find(
+              "\"ability_id\":0") != std::string::npos,
+          "dictionary id zero should declare the synthetic Other bucket");
 
     DamageLogRepository reopened(root);
     std::string recover_error;

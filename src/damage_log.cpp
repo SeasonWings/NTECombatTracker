@@ -126,14 +126,20 @@ bool AtomicWrite(
     return true;
 }
 
-bool DurableAppend(
+bool AtomicAppend(
     const std::filesystem::path& path,
     const std::string_view content,
     std::string& error) {
-    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
+    const std::filesystem::path temporary = path.wstring() + L".append.tmp";
+    if (!CopyFileW(path.c_str(), temporary.c_str(), FALSE)) {
+        error = "copy append file failed: " + std::to_string(GetLastError());
+        return false;
+    }
+    HANDLE file = CreateFileW(temporary.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         error = "open append file failed: " + std::to_string(GetLastError());
+        DeleteFileW(temporary.c_str());
         return false;
     }
     DWORD written{};
@@ -144,6 +150,13 @@ bool DurableAppend(
     CloseHandle(file);
     if (!ok) {
         error = "append file failed: " + std::to_string(append_error);
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        error = "atomic append replace failed: " + std::to_string(GetLastError());
+        DeleteFileW(temporary.c_str());
         return false;
     }
     return true;
@@ -492,6 +505,9 @@ struct DamageLogRepository::Impl {
         }
         std::ranges::sort(rows, {}, &ActorEntry::actor_id);
         report.actors_content.clear();
+        report.actors_content =
+            "{\"schema_version\":1,\"actor_id\":0,\"handle\":{\"id\":\"0\","
+            "\"generation\":\"0\"},\"path\":\"Other\",\"resolution_status\":\"synthetic\"}\n";
         for (const ActorEntry* actor : rows) {
             report.actors_content += "{\"schema_version\":1,\"actor_id\":" +
                 std::to_string(actor->actor_id) + ",\"handle\":{\"id\":" +
@@ -511,6 +527,9 @@ struct DamageLogRepository::Impl {
         }
         std::ranges::sort(rows, {}, &AbilityEntry::ability_id);
         report.abilities_content.clear();
+        report.abilities_content =
+            "{\"schema_version\":1,\"ability_id\":0,\"source_id\":\"0\","
+            "\"name\":\"Other\",\"resolution_status\":\"synthetic\"}\n";
         for (const AbilityEntry* ability : rows) {
             report.abilities_content += "{\"schema_version\":1,\"ability_id\":" +
                 std::to_string(ability->ability_id) + ",\"source_id\":" +
@@ -718,6 +737,9 @@ bool DamageLogRepository::Recover(std::string& error) {
                 encounter.encounter_dps = ExtractDouble(line, "encounter_dps");
                 encounter.complete = ExtractBool(line, "complete", false);
                 item.encounters.push_back(std::move(encounter));
+                if (item.encounters.size() > kMaximumHistoryEncounters) {
+                    item.encounters.erase(item.encounters.begin());
+                }
             }
         }
         for (const auto& file : std::filesystem::recursive_directory_iterator(
@@ -898,7 +920,9 @@ bool DamageLogRepository::EndEncounter(
     const bool complete = !encounter.quality.partial && !encounter.quality.overflow &&
         !encounter.quality.cursor_gap && !report.aggregate_truncated &&
         encounter.dropped_events == 0 && encounter.write_error.empty() &&
-        encounter.service_unavailable_intervals.empty();
+        encounter.service_unavailable_intervals.empty() &&
+        !encounter.open_missing_sequence_start &&
+        !encounter.service_intervals_truncated && !encounter.missing_ranges_truncated;
     const auto encounter_duration_us = static_cast<std::uint64_t>(
         (std::max)(0.0, duration) * 1'000'000.0);
     std::ostringstream line;
@@ -935,12 +959,23 @@ bool DamageLogRepository::EndEncounter(
              << '}';
     }
     line << ']'
+         << ",\"open_missing_sequence_start\":";
+    if (encounter.open_missing_sequence_start) {
+        line << Decimal(*encounter.open_missing_sequence_start);
+    } else {
+        line << "null";
+    }
+    line
          << ",\"complete\":" << (complete ? "true" : "false")
          << ",\"quality\":{\"partial\":" << (encounter.quality.partial ? "true" : "false")
          << ",\"overflow\":" << (encounter.quality.overflow ? "true" : "false")
          << ",\"cursor_gap\":" << (encounter.quality.cursor_gap ? "true" : "false")
          << ",\"aggregate_truncated\":"
          << ((encounter.quality.aggregate_truncated || report.aggregate_truncated) ? "true" : "false")
+         << ",\"service_intervals_truncated\":"
+         << (encounter.service_intervals_truncated ? "true" : "false")
+         << ",\"missing_ranges_truncated\":"
+         << (encounter.missing_ranges_truncated ? "true" : "false")
          << "},\"actor_outgoing\":";
     Impl::WriteAggregateArray(line, report.actor_outgoing, encounter_duration_us,
         [](auto& json, const std::uint64_t key) { json << "\"actor_id\":" << key; });
@@ -966,7 +1001,7 @@ bool DamageLogRepository::EndEncounter(
     Impl::WriteAggregateArray(line, report.ability_target, encounter_duration_us,
         composite_ids("ability_id", "target_actor_id"));
     line << "}\n";
-    if (!DurableAppend(report.directory / "encounters.jsonl", line.str(), error)) return false;
+    if (!AtomicAppend(report.directory / "encounters.jsonl", line.str(), error)) return false;
     ++report.encounter_count;
     report.history.encounter_count = report.encounter_count;
     report.history.encounters.push_back({encounter.encounter_id, encounter.reason,
@@ -979,7 +1014,8 @@ bool DamageLogRepository::EndEncounter(
     impl_->RefreshActiveBytes();
     impl_->history.front() = report.history;
     report.encounter.reset();
-    return impl_->FlushSegment(error) && impl_->WriteReport(error) && impl_->WriteCatalog(error);
+    return impl_->FlushSegment(error) && impl_->WriteReport(error) &&
+        impl_->WriteIndex(error) && impl_->WriteCatalog(error);
 }
 
 bool DamageLogRepository::CloseReport(const ReportClose& close, std::string& error) {
@@ -989,24 +1025,34 @@ bool DamageLogRepository::CloseReport(const ReportClose& close, std::string& err
     }
     if (!impl_->SealSegment(error)) return false;
     auto& report = *impl_->active;
+    if (!impl_->WriteIndex(error)) return false;
+    std::error_code filesystem_error;
+    std::uint64_t total_bytes{};
+    for (const auto& file : std::filesystem::recursive_directory_iterator(
+             report.directory, filesystem_error)) {
+        if (!filesystem_error && file.is_regular_file()) {
+            total_bytes += file.file_size();
+        }
+    }
     report.history.open = false;
     report.history.closed_utc_ms = close.closed_utc_ms;
     report.history.close_reason = close.unclean_shutdown ? "unclean_shutdown" : close.reason;
     report.history.complete = report.history.complete && !close.unclean_shutdown &&
         !close.incomplete;
+    report.history.total_bytes = total_bytes;
     report.write_error = close.write_error;
     impl_->history.front() = report.history;
-    if (!impl_->WriteReport(error) || !impl_->WriteIndex(error)) return false;
-    std::error_code filesystem_error;
-    report.history.total_bytes = 0;
-    for (const auto& file : std::filesystem::recursive_directory_iterator(
-             report.directory, filesystem_error)) {
-        if (!filesystem_error && file.is_regular_file()) {
-            report.history.total_bytes += file.file_size();
-        }
+    if (!impl_->WriteCatalog(error) || !impl_->WriteReport(error)) {
+        const std::string close_error = error.empty() ? "report close failed" : error;
+        report.history.complete = false;
+        report.write_error = close_error;
+        impl_->history.front() = report.history;
+        std::string ignored;
+        static_cast<void>(impl_->WriteReport(ignored));
+        static_cast<void>(impl_->WriteCatalog(ignored));
+        error = close_error;
+        return false;
     }
-    impl_->history.front() = report.history;
-    if (!impl_->WriteCatalog(error)) return false;
     impl_->active.reset();
     return true;
 }
@@ -1016,15 +1062,24 @@ bool DamageLogRepository::DeleteReport(const std::string& report_id, std::string
         error = "report is invalid or active";
         return false;
     }
-    const auto root = std::filesystem::weakly_canonical(impl_->root);
+    std::error_code filesystem_error;
+    const auto root = std::filesystem::weakly_canonical(impl_->root, filesystem_error);
+    if (filesystem_error) {
+        error = filesystem_error.message();
+        return false;
+    }
     const auto target = std::filesystem::weakly_canonical(
-        impl_->root / "reports" / report_id);
+        impl_->root / "reports" / report_id, filesystem_error);
+    if (filesystem_error) {
+        error = filesystem_error.message();
+        return false;
+    }
     const auto relative = target.lexically_relative(root);
     if (relative.empty() || relative.native().starts_with(L"..")) {
         error = "report path escapes log root";
         return false;
     }
-    if (!std::filesystem::is_directory(target)) {
+    if (!std::filesystem::is_directory(target, filesystem_error) || filesystem_error) {
         error = "report does not exist";
         return false;
     }
@@ -1044,9 +1099,9 @@ bool DamageLogRepository::DeleteReport(const std::string& report_id, std::string
             offset = end + 1;
         }
     }
-    std::error_code filesystem_error;
     for (const auto& entry : std::filesystem::directory_iterator(target, filesystem_error)) {
-        if (filesystem_error || !entry.is_regular_file() ||
+        const bool regular = entry.is_regular_file(filesystem_error);
+        if (filesystem_error || !regular ||
             !allowed.contains(entry.path().filename().string())) {
             error = "report contains an unexpected path";
             return false;

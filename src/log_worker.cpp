@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
@@ -105,6 +106,7 @@ struct DamageLogWorker::Impl {
             error.clear();
             bool refresh_history{};
             bool reset_drop_status{};
+            try {
             if (has_command) {
                 std::visit([&](auto& value) {
                     using Value = std::decay_t<decltype(value)>;
@@ -154,6 +156,10 @@ struct DamageLogWorker::Impl {
                             value.missing_sequence_ranges.insert(
                                 value.missing_sequence_ranges.end(),
                                 encounter_failed_ranges.begin(), encounter_failed_ranges.end());
+                            if (value.missing_sequence_ranges.size() > 64) {
+                                value.missing_sequence_ranges.resize(64);
+                                value.missing_ranges_truncated = true;
+                            }
                             if (value.write_error.empty()) {
                                 value.write_error = encounter_write_error.empty()
                                     ? pending_write_error : encounter_write_error;
@@ -184,6 +190,13 @@ struct DamageLogWorker::Impl {
                 }
                 refresh_history = true;
                 last_flush = now;
+            }
+            } catch (const std::exception& exception) {
+                succeeded = false;
+                error = std::string("log worker exception: ") + exception.what();
+            } catch (...) {
+                succeeded = false;
+                error = "unknown log worker exception";
             }
             std::scoped_lock lock(mutex);
             if (reset_drop_status) {
@@ -224,7 +237,22 @@ bool DamageLogWorker::Start() {
     impl_->status = {};
     impl_->status.running = true;
     try {
-        impl_->thread = std::thread([this] { impl_->Run(); });
+        impl_->thread = std::thread([this] {
+            try {
+                impl_->Run();
+            } catch (const std::exception& exception) {
+                std::scoped_lock lock(impl_->mutex);
+                impl_->status.ready = false;
+                impl_->stopping = true;
+                impl_->status.last_error =
+                    std::string("log worker terminated safely: ") + exception.what();
+            } catch (...) {
+                std::scoped_lock lock(impl_->mutex);
+                impl_->status.ready = false;
+                impl_->stopping = true;
+                impl_->status.last_error = "log worker terminated safely: unknown exception";
+            }
+        });
     } catch (...) {
         impl_->status.running = false;
         impl_->status.last_error = "failed to create log writer thread";
