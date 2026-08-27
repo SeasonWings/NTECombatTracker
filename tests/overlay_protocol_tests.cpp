@@ -3,10 +3,14 @@
 #include <chrono>
 #include <iostream>
 #include <limits>
+#include <type_traits>
 
 namespace {
 
 using nte::combat_stats::NteOverlaySnapshot;
+
+static_assert(std::is_copy_constructible_v<NteOverlaySnapshot>);
+static_assert(!std::is_copy_assignable_v<NteOverlaySnapshot>);
 
 int failures{};
 
@@ -17,7 +21,7 @@ void Check(const bool condition, const char* message) {
 }
 
 NteOverlaySnapshot ExampleSnapshot() {
-    NteOverlaySnapshot message;
+    NteOverlaySnapshot::Data message;
     message.producer_instance_id = "6ee28b4d-7039-4bc4-b068-1468f280745d";
     message.snapshot_sequence = std::numeric_limits<std::uint64_t>::max();
     message.latest_damage_sequence = std::numeric_limits<std::uint64_t>::max() - 1;
@@ -61,7 +65,7 @@ NteOverlaySnapshot ExampleSnapshot() {
     player.rolling_dps = 40.0;
     message.combat.players.push_back(std::move(player));
     message.combat.controlled_character_count = 1;
-    return message;
+    return NteOverlaySnapshot(std::move(message));
 }
 
 void RoundTripPreservesVersionedNteSnapshot() {
@@ -149,6 +153,18 @@ void ParserRejectsMissingRequiredFieldsAndUnsupportedVersions() {
     json.replace(json.find(metric), metric.size(), "\"metric_version\":2");
     Check(!nte::combat_stats::ParseOverlaySnapshot(json, error).has_value(),
           "unsupported metric major versions should be rejected");
+
+    json = nte::combat_stats::SerializeOverlaySnapshot(ExampleSnapshot());
+    const std::string required_rate = "\"critical_rate\":50.0,";
+    json.erase(json.find(required_rate), required_rate.size());
+    Check(!nte::combat_stats::ParseOverlaySnapshot(json, error).has_value(),
+          "missing required derived player metrics should be rejected");
+
+    json = nte::combat_stats::SerializeOverlaySnapshot(ExampleSnapshot());
+    const std::string valid_rate = "\"critical_rate\":50.0";
+    json.replace(json.find(valid_rate), valid_rate.size(), "\"critical_rate\":49.0");
+    Check(!nte::combat_stats::ParseOverlaySnapshot(json, error).has_value(),
+          "inconsistent derived player metrics should be rejected");
 }
 
 }  // namespace

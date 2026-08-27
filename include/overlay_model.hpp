@@ -45,9 +45,6 @@ struct WindowExtent {
 
 enum class HitRegion : std::uint8_t { Client, Title, ColumnHeader, ResizeGrip };
 
-[[nodiscard]] double CriticalRate(const PlayerRow& row) noexcept;
-[[nodiscard]] double HeadRate(const PlayerRow& row) noexcept;
-[[nodiscard]] double WeakRate(const PlayerRow& row) noexcept;
 [[nodiscard]] std::vector<PlayerRow> SortPlayers(
     const std::vector<PlayerRow>& players,
     SortColumn column,
@@ -61,6 +58,11 @@ enum class HitRegion : std::uint8_t { Client, Title, ColumnHeader, ResizeGrip };
 [[nodiscard]] WindowExtent ScaleWindowExtent(
     int logical_width,
     int logical_height,
+    float dpi_scale,
+    float ui_scale) noexcept;
+[[nodiscard]] WindowExtent UnscaleWindowExtent(
+    int physical_width,
+    int physical_height,
     float dpi_scale,
     float ui_scale) noexcept;
 [[nodiscard]] HitRegion HitTest(

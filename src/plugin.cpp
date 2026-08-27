@@ -51,7 +51,7 @@ struct NameCacheEntry {
 };
 
 struct RenderState {
-    Snapshot stats;
+    std::shared_ptr<const NteOverlaySnapshot> snapshot;
     std::uint32_t service_status{ANOMALY_STATUS_V1_UNAVAILABLE};
     std::uint64_t latest_sequence{};
     nte::damage_log::LogWorkerStatus log;
@@ -64,6 +64,12 @@ struct RenderState {
     std::uint64_t overlay_dropped{};
     std::string overlay_error;
 };
+
+NteOverlaySnapshot FreezeCombatSnapshot(Snapshot snapshot) {
+    NteOverlaySnapshot::Data data;
+    data.combat = std::move(snapshot);
+    return NteOverlaySnapshot(std::move(data));
+}
 
 struct LogSession {
     Handle world;
@@ -112,6 +118,7 @@ struct Context {
     std::uint64_t local_overlay_drops{};
     nte::combat_stats::OverlayPublishPolicy overlay_policy;
     bool overlay_launch_attempted{};
+    bool overlay_restart_pending{};
     bool restart_overlay_requested{};
     AnomalyWebSocketServerInfoV1 overlay_server_info{sizeof(AnomalyWebSocketServerInfoV1)};
     std::string overlay_error;
@@ -364,9 +371,10 @@ bool OpenEncounterLog(
 
 void FinishEncounterLog(
     const char* reason,
-    const Snapshot& snapshot,
+    const NteOverlaySnapshot& overlay_snapshot,
     const TimePoint now,
     const std::int64_t utc_ms) {
+    const Snapshot& snapshot = overlay_snapshot.combat;
     auto& session = g_context.log_session;
     if (!g_context.log_worker || session.encounter_id.empty()) return;
     auto quality = snapshot.quality;
@@ -476,7 +484,10 @@ std::optional<std::filesystem::path> PluginDirectory() {
     return std::filesystem::path(std::move(wide));
 }
 
-bool LaunchOverlay(const std::uint16_t port, std::string& error_message) {
+bool LaunchOverlay(
+    const std::uint16_t port,
+    const bool restart,
+    std::string& error_message) {
     error_message.clear();
     if (port == 0) {
         error_message = "WebSocket listener is unavailable";
@@ -502,6 +513,7 @@ bool LaunchOverlay(const std::uint16_t port, std::string& error_message) {
     }
     std::wstring command = L"\"" + executable.wstring() + L"\" --port " +
         std::to_wstring(port);
+    if (restart) command += L" --restart";
     std::vector<wchar_t> mutable_command(command.begin(), command.end());
     mutable_command.push_back(L'\0');
     STARTUPINFOW startup{};
@@ -567,7 +579,9 @@ void PublishOverlay(
     g_context.overlay_policy.ObserveServer(now, server.connected_clients);
     if (!stopping && server.port != 0 && !g_context.overlay_launch_attempted) {
         g_context.overlay_launch_attempted = true;
-        static_cast<void>(LaunchOverlay(server.port, g_context.overlay_error));
+        static_cast<void>(LaunchOverlay(
+            server.port, g_context.overlay_restart_pending, g_context.overlay_error));
+        g_context.overlay_restart_pending = false;
     }
     if (g_context.websocket == nullptr || g_context.websocket->publish_text == nullptr ||
         server.port == 0) return;
@@ -575,25 +589,26 @@ void PublishOverlay(
         stats, service_status, report_id, encounter_id, stopping);
     if (!g_context.overlay_policy.ShouldPublish(
             now, state_revision, force || stopping)) return;
-    NteOverlaySnapshot message;
-    message.producer_instance_id = g_context.producer_instance_id;
-    message.snapshot_sequence = ++g_context.overlay_snapshot_sequence;
-    message.latest_damage_sequence = latest_sequence;
-    message.sent_utc_ms = utc_ms;
-    message.producer_stopping = stopping;
-    message.capture_available = service_status == ANOMALY_STATUS_V1_OK;
-    message.capture_status = CaptureStatusName(service_status);
-    message.report_id = report_id;
-    message.encounter_id = encounter_id;
+    NteOverlaySnapshot::Data data;
+    data.producer_instance_id = g_context.producer_instance_id;
+    data.snapshot_sequence = ++g_context.overlay_snapshot_sequence;
+    data.latest_damage_sequence = latest_sequence;
+    data.sent_utc_ms = utc_ms;
+    data.producer_stopping = stopping;
+    data.capture_available = service_status == ANOMALY_STATUS_V1_OK;
+    data.capture_status = CaptureStatusName(service_status);
+    data.report_id = report_id;
+    data.encounter_id = encounter_id;
     if (!stats.outgoing_targets.empty()) {
-        message.primary_target = stats.outgoing_targets.front().label;
+        data.primary_target = stats.outgoing_targets.front().label;
     }
-    message.websocket_port = server.port;
-    message.connected_clients = server.connected_clients;
-    message.published_messages = server.published_messages;
-    message.transport_dropped_messages = server.dropped_messages +
+    data.websocket_port = server.port;
+    data.connected_clients = server.connected_clients;
+    data.published_messages = server.published_messages;
+    data.transport_dropped_messages = server.dropped_messages +
         g_context.local_overlay_drops;
-    message.combat = stats;
+    data.combat = stats;
+    const NteOverlaySnapshot message(std::move(data));
     const std::string json = nte::combat_stats::SerializeOverlaySnapshot(message);
     if (json.size() > nte::combat_stats::kMaximumOverlayMessageBytes ||
         g_context.websocket->publish_text(
@@ -619,6 +634,7 @@ void ResetState() {
     g_context.local_overlay_drops = 0;
     g_context.overlay_policy.Reset();
     g_context.overlay_launch_attempted = false;
+    g_context.overlay_restart_pending = false;
     g_context.restart_overlay_requested = false;
     g_context.overlay_server_info = {sizeof(AnomalyWebSocketServerInfoV1)};
     g_context.overlay_error.clear();
@@ -651,7 +667,8 @@ void Update(void* context, double) {
     g_context.engine.Advance(now);
     if (!g_context.log_session.encounter_id.empty() &&
         g_context.engine.state() == EncounterState::Completed) {
-        FinishEncounterLog("inactivity", g_context.engine.BuildSnapshot(now), now, utc_ms);
+        FinishEncounterLog("inactivity",
+            FreezeCombatSnapshot(g_context.engine.BuildSnapshot(now)), now, utc_ms);
     }
 
     bool reset_requested{};
@@ -668,6 +685,7 @@ void Update(void* context, double) {
     }
     if (restart_overlay_requested) {
         g_context.overlay_launch_attempted = false;
+        g_context.overlay_restart_pending = true;
         g_context.overlay_error.clear();
     }
     if (!delete_request.empty() && g_context.log_worker) {
@@ -675,7 +693,8 @@ void Update(void* context, double) {
     }
     if (reset_requested) {
         if (!g_context.log_session.encounter_id.empty()) {
-            FinishEncounterLog("manual_reset", g_context.engine.BuildSnapshot(now), now, utc_ms);
+            FinishEncounterLog("manual_reset",
+                FreezeCombatSnapshot(g_context.engine.BuildSnapshot(now)), now, utc_ms);
         }
         g_context.engine.Reset();
         g_context.cursor.RequestReset();
@@ -722,8 +741,8 @@ void Update(void* context, double) {
             if (!g_context.log_session.report_id.empty() &&
                 observed_world != g_context.log_session.world) {
                 if (!g_context.log_session.encounter_id.empty()) {
-                    FinishEncounterLog("world_changed",
-                        g_context.engine.BuildSnapshot(now), now, utc_ms);
+                    FinishEncounterLog("world_changed", FreezeCombatSnapshot(
+                        g_context.engine.BuildSnapshot(now)), now, utc_ms);
                 }
                 FinishReportLog("world_changed", utc_ms);
             }
@@ -860,15 +879,35 @@ void Update(void* context, double) {
     UpdateServiceGap(capture_available && service_status == ANOMALY_STATUS_V1_OK, now);
 
     RenderState next;
-    next.stats = g_context.engine.BuildSnapshot(now);
+    Snapshot stats = g_context.engine.BuildSnapshot(now);
     next.service_status = service_status;
     next.latest_sequence = latest;
     if (g_context.log_worker) next.log = g_context.log_worker->Status();
     next.log_root = g_context.log_root.string();
     next.report_id = g_context.log_session.report_id;
     next.encounter_id = g_context.log_session.encounter_id;
-    PublishOverlay(next.stats, service_status, latest, next.report_id,
+    PublishOverlay(stats, service_status, latest, next.report_id,
         next.encounter_id, utc_ms, now);
+    NteOverlaySnapshot::Data render_snapshot;
+    render_snapshot.producer_instance_id = g_context.producer_instance_id;
+    render_snapshot.snapshot_sequence = g_context.overlay_snapshot_sequence;
+    render_snapshot.latest_damage_sequence = latest;
+    render_snapshot.sent_utc_ms = utc_ms;
+    render_snapshot.capture_available = service_status == ANOMALY_STATUS_V1_OK;
+    render_snapshot.capture_status = CaptureStatusName(service_status);
+    render_snapshot.report_id = next.report_id;
+    render_snapshot.encounter_id = next.encounter_id;
+    if (!stats.outgoing_targets.empty()) {
+        render_snapshot.primary_target = stats.outgoing_targets.front().label;
+    }
+    render_snapshot.websocket_port = g_context.overlay_server_info.port;
+    render_snapshot.connected_clients = g_context.overlay_server_info.connected_clients;
+    render_snapshot.published_messages = g_context.overlay_server_info.published_messages;
+    render_snapshot.transport_dropped_messages =
+        g_context.overlay_server_info.dropped_messages + g_context.local_overlay_drops;
+    render_snapshot.combat = std::move(stats);
+    next.snapshot = std::make_shared<const NteOverlaySnapshot>(
+        std::move(render_snapshot));
     next.websocket_port = g_context.overlay_server_info.port;
     next.overlay_clients = g_context.overlay_server_info.connected_clients;
     next.overlay_published = g_context.overlay_server_info.published_messages;
@@ -944,7 +983,8 @@ void DrawPlayerTable(const AnomalyUiServiceV1* ui, const std::vector<nte::combat
 }
 
 void DrawOverview(const AnomalyUiServiceV1* ui, const RenderState& render) {
-    const Snapshot& stats = render.stats;
+    const Snapshot empty;
+    const Snapshot& stats = render.snapshot ? render.snapshot->combat : empty;
     TextFormat(ui, "状态：%s  持续：%.1f 秒  上场角色：%zu",
         StateName(stats.state), stats.duration_seconds, stats.controlled_character_count);
     TextFormat(ui, "输出：%lld  遭遇 DPS：%.1f  10秒 DPS：%.1f",
@@ -1090,6 +1130,8 @@ void Draw(void*, const AnomalyUiServiceV1* ui) {
         std::scoped_lock lock(g_context.mutex);
         render = g_context.render;
     }
+    const Snapshot empty_stats;
+    const Snapshot& stats = render.snapshot ? render.snapshot->combat : empty_stats;
     int open = 1;
     anomaly::sdk::UiWindow window(ui, "NTE Combat Stats", &open);
     if (!window) return;
@@ -1114,22 +1156,22 @@ void Draw(void*, const AnomalyUiServiceV1* ui) {
             ui->end_tab_item(ui->user);
         }
         if (ui->begin_tab_item(ui->user, anomaly::sdk::StringView("伤害来源"), nullptr, 0, 1)) {
-            DrawAggregateTable(ui, "sources", render.stats.outgoing_sources, render.stats.outgoing_damage);
+            DrawAggregateTable(ui, "sources", stats.outgoing_sources, stats.outgoing_damage);
             ui->end_tab_item(ui->user);
         }
         if (ui->begin_tab_item(ui->user, anomaly::sdk::StringView("参与者"), nullptr, 0, 1)) {
             Text(ui, "确认参战角色");
-            DrawPlayerTable(ui, render.stats.players);
+            DrawPlayerTable(ui, stats.players);
             Text(ui, "输出目标");
-            DrawAggregateTable(ui, "targets", render.stats.outgoing_targets, render.stats.outgoing_damage);
+            DrawAggregateTable(ui, "targets", stats.outgoing_targets, stats.outgoing_damage);
             Text(ui, "承伤来源");
-            DrawAggregateTable(ui, "attackers", render.stats.incoming_sources, render.stats.incoming_damage);
+            DrawAggregateTable(ui, "attackers", stats.incoming_sources, stats.incoming_damage);
             ui->end_tab_item(ui->user);
         }
         if (ui->begin_tab_item(ui->user, anomaly::sdk::StringView("最近事件"), nullptr, 0, 1)) {
-            const std::size_t count = (std::min)(kMaximumRecentRows, render.stats.recent_events.size());
+            const std::size_t count = (std::min)(kMaximumRecentRows, stats.recent_events.size());
             for (std::size_t offset{}; offset < count; ++offset) {
-                const auto& event = render.stats.recent_events[render.stats.recent_events.size() - 1 - offset];
+                const auto& event = stats.recent_events[stats.recent_events.size() - 1 - offset];
                 const char* direction = event.direction == EventDirection::Both
                     ? "双向" : (event.direction == EventDirection::Outgoing ? "输出" :
                         (event.direction == EventDirection::Incoming ? "承伤" : "可见"));
@@ -1215,7 +1257,8 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void*, std::uint32_t) {
             g_context.log_session.encounter_id, utc_ms, now, true, true);
     }
     if (!g_context.log_session.encounter_id.empty()) {
-        FinishEncounterLog("plugin_stop", g_context.engine.BuildSnapshot(now), now, utc_ms);
+        FinishEncounterLog("plugin_stop",
+            FreezeCombatSnapshot(g_context.engine.BuildSnapshot(now)), now, utc_ms);
     }
     FinishReportLog("plugin_stop", utc_ms);
     if (g_context.log_worker) {

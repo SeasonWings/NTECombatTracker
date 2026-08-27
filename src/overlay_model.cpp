@@ -14,10 +14,10 @@ double Metric(const PlayerRow& row, const SortColumn column) noexcept {
     case SortColumn::Damage: return static_cast<double>(row.damage);
     case SortColumn::Share: return row.damage_share;
     case SortColumn::EncounterDps: return row.encounter_dps;
-    case SortColumn::CriticalRate: return CriticalRate(row);
+    case SortColumn::CriticalRate: return PlayerCriticalRate(row);
     case SortColumn::MaximumHit: return static_cast<double>(row.maximum_hit);
-    case SortColumn::HeadRate: return HeadRate(row);
-    case SortColumn::WeakRate: return WeakRate(row);
+    case SortColumn::HeadRate: return PlayerHeadRate(row);
+    case SortColumn::WeakRate: return PlayerWeakRate(row);
     case SortColumn::ActiveDps: return row.active_dps;
     case SortColumn::RollingDps: return row.rolling_dps;
     }
@@ -25,18 +25,6 @@ double Metric(const PlayerRow& row, const SortColumn column) noexcept {
 }
 
 }  // namespace
-
-double CriticalRate(const PlayerRow& row) noexcept {
-    return PlayerCriticalRate(row);
-}
-
-double HeadRate(const PlayerRow& row) noexcept {
-    return PlayerHeadRate(row);
-}
-
-double WeakRate(const PlayerRow& row) noexcept {
-    return PlayerWeakRate(row);
-}
 
 std::vector<PlayerRow> SortPlayers(
     const std::vector<PlayerRow>& players,
@@ -91,6 +79,21 @@ WindowExtent ScaleWindowExtent(
             static_cast<float>(logical_width) * scale))),
         std::max(1, static_cast<int>(std::lround(
             static_cast<float>(logical_height) * scale))),
+    };
+}
+
+WindowExtent UnscaleWindowExtent(
+    const int physical_width,
+    const int physical_height,
+    const float dpi_scale,
+    const float ui_scale) noexcept {
+    const float scale = std::clamp(dpi_scale, 0.5F, 4.0F) *
+        std::clamp(ui_scale, 0.75F, 2.0F);
+    return {
+        std::max(1, static_cast<int>(std::lround(
+            static_cast<float>(physical_width) / scale))),
+        std::max(1, static_cast<int>(std::lround(
+            static_cast<float>(physical_height) / scale))),
     };
 }
 

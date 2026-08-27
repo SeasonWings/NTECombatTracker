@@ -35,14 +35,15 @@ using nte::combat_stats::EncounterState;
 using nte::combat_stats::NteOverlaySnapshot;
 using nte::combat_stats::PlayerRow;
 using nte::combat_stats::overlay::CalculateLayout;
-using nte::combat_stats::overlay::CriticalRate;
-using nte::combat_stats::overlay::HeadRate;
+using nte::combat_stats::PlayerCriticalRate;
+using nte::combat_stats::PlayerHeadRate;
+using nte::combat_stats::PlayerWeakRate;
 using nte::combat_stats::overlay::HitRegion;
 using nte::combat_stats::overlay::HitTest;
 using nte::combat_stats::overlay::SortColumn;
 using nte::combat_stats::overlay::SortPlayers;
 using nte::combat_stats::overlay::ScaleWindowExtent;
-using nte::combat_stats::overlay::WeakRate;
+using nte::combat_stats::overlay::UnscaleWindowExtent;
 using namespace std::chrono_literals;
 
 constexpr wchar_t kWindowClass[] = L"NteCombatOverlay.Window.v1";
@@ -51,6 +52,7 @@ constexpr wchar_t kMutexName[] = L"Local\\NteCombatOverlay.local.nte.combat-stat
 constexpr UINT kSnapshotMessage = WM_APP + 1;
 constexpr UINT kTrayMessage = WM_APP + 2;
 constexpr UINT kShowMessage = WM_APP + 3;
+constexpr UINT kRestartMessage = WM_APP + 4;
 constexpr UINT kHotkeyId = 1;
 constexpr UINT_PTR kStaleTimerId = 1;
 constexpr UINT kTrayId = 1;
@@ -179,6 +181,7 @@ bool LoadSettings() {
     if (!stream) return false;
     try {
         const nlohmann::json json = nlohmann::json::parse(stream);
+        if (json.value("schema_version", 0) != 2) return false;
         auto& value = g_app.settings;
         value.x = json.value("x", value.x);
         value.y = json.value("y", value.y);
@@ -212,8 +215,13 @@ void SaveSettings() {
         g_app.settings.x = rect.left;
         g_app.settings.y = rect.top;
         if (!g_app.settings.collapsed) {
-            g_app.settings.width = rect.right - rect.left;
-            g_app.settings.height = rect.bottom - rect.top;
+            const float dpi_scale =
+                static_cast<float>(GetDpiForWindow(g_app.window)) / 96.0F;
+            const auto logical = UnscaleWindowExtent(
+                rect.right - rect.left, rect.bottom - rect.top,
+                dpi_scale, g_app.settings.ui_scale);
+            g_app.settings.width = logical.width;
+            g_app.settings.height = logical.height;
         }
     }
     std::error_code error;
@@ -222,7 +230,7 @@ void SaveSettings() {
     const auto temporary = g_app.settings_path.parent_path() / L"overlay-settings.json.tmp";
     const auto& value = g_app.settings;
     const nlohmann::json json{
-        {"schema_version", 1}, {"x", value.x}, {"y", value.y},
+        {"schema_version", 2}, {"x", value.x}, {"y", value.y},
         {"width", value.width}, {"height", value.height}, {"locked", value.locked},
         {"collapsed", value.collapsed}, {"topmost", value.topmost},
         {"hide_idle", value.hide_idle}, {"show_head", value.show_head},
@@ -302,10 +310,10 @@ std::wstring CellText(const PlayerRow& row, const SortColumn column) {
     case SortColumn::Damage: return CompactNumber(static_cast<double>(row.damage));
     case SortColumn::Share: return std::format(L"{:.1f}%", row.damage_share);
     case SortColumn::EncounterDps: return CompactNumber(row.encounter_dps);
-    case SortColumn::CriticalRate: return std::format(L"{:.1f}%", CriticalRate(row));
+    case SortColumn::CriticalRate: return std::format(L"{:.1f}%", PlayerCriticalRate(row));
     case SortColumn::MaximumHit: return CompactNumber(static_cast<double>(row.maximum_hit));
-    case SortColumn::HeadRate: return std::format(L"{:.1f}%", HeadRate(row));
-    case SortColumn::WeakRate: return std::format(L"{:.1f}%", WeakRate(row));
+    case SortColumn::HeadRate: return std::format(L"{:.1f}%", PlayerHeadRate(row));
+    case SortColumn::WeakRate: return std::format(L"{:.1f}%", PlayerWeakRate(row));
     case SortColumn::ActiveDps: return CompactNumber(row.active_dps);
     case SortColumn::RollingDps: return CompactNumber(row.rolling_dps);
     }
@@ -345,7 +353,7 @@ void RenderOverlay() {
     bool connected{};
     {
         std::scoped_lock lock(g_app.snapshot_mutex);
-        snapshot = g_app.snapshot;
+        if (g_app.snapshot) snapshot.emplace(*g_app.snapshot);
         status = g_app.connection_status;
         connected = g_app.connected;
     }
@@ -570,7 +578,7 @@ void ReceiveSnapshots(const std::stop_token stop) {
                         g_app.snapshot->latest_damage_sequence) {
                     redraw = false;
                 }
-                g_app.snapshot = std::move(parsed);
+                g_app.snapshot.emplace(std::move(*parsed));
                 g_app.last_snapshot = std::chrono::steady_clock::now();
                 g_app.connection_status = "已连接";
             }
@@ -597,7 +605,8 @@ void ToggleCollapsed() {
     const float dpi = static_cast<float>(GetDpiForWindow(g_app.window)) / 96.0F;
     const int height = g_app.settings.collapsed
         ? static_cast<int>(std::round(34.0F * dpi * g_app.settings.ui_scale))
-        : g_app.settings.height;
+        : ScaleWindowExtent(1, g_app.settings.height,
+            dpi, g_app.settings.ui_scale).height;
     SetWindowPos(g_app.window, nullptr, 0, 0, rect.right - rect.left, height,
         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     SaveSettings();
@@ -663,21 +672,24 @@ void HandleMenu(const UINT id) {
     case MenuScale150: {
         const float next_scale = id == MenuScale100 ? 1.0F :
             (id == MenuScale125 ? 1.25F : 1.5F);
-        const float ratio = next_scale / g_app.settings.ui_scale;
         RECT rect{};
         GetWindowRect(g_app.window, &rect);
-        if (g_app.settings.collapsed) {
-            g_app.settings.width = std::max(1, static_cast<int>(std::lround(
-                static_cast<float>(g_app.settings.width) * ratio)));
-            g_app.settings.height = std::max(1, static_cast<int>(std::lround(
-                static_cast<float>(g_app.settings.height) * ratio)));
+        const float dpi_scale =
+            static_cast<float>(GetDpiForWindow(g_app.window)) / 96.0F;
+        if (!g_app.settings.collapsed) {
+            const auto logical = UnscaleWindowExtent(
+                rect.right - rect.left, rect.bottom - rect.top,
+                dpi_scale, g_app.settings.ui_scale);
+            g_app.settings.width = logical.width;
+            g_app.settings.height = logical.height;
         }
         g_app.settings.ui_scale = next_scale;
+        const auto extent = ScaleWindowExtent(
+            g_app.settings.width,
+            g_app.settings.collapsed ? 34 : g_app.settings.height,
+            dpi_scale, next_scale);
         SetWindowPos(g_app.window, nullptr, 0, 0,
-            std::max(1, static_cast<int>(std::lround(
-                static_cast<float>(rect.right - rect.left) * ratio))),
-            std::max(1, static_cast<int>(std::lround(
-                static_cast<float>(rect.bottom - rect.top) * ratio))),
+            extent.width, extent.height,
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         break;
     }
@@ -692,6 +704,7 @@ void HandleMenu(const UINT id) {
 
 LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == g_app.taskbar_created) { AddTrayIcon(); return 0; }
+    if (message == kRestartMessage) { DestroyWindow(window); return 0; }
     switch (message) {
     case WM_NCCALCSIZE:
         if (wparam != 0) return 0;
@@ -854,32 +867,49 @@ std::uint16_t ParsePort() {
     return port;
 }
 
+bool RestartRequested() {
+    int count{};
+    wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &count);
+    bool restart{};
+    if (arguments) {
+        for (int i = 1; i < count; ++i) {
+            if (wcscmp(arguments[i], L"--restart") == 0) {
+                restart = true;
+                break;
+            }
+        }
+        LocalFree(arguments);
+    }
+    return restart;
+}
+
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, kMutexName);
-    if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+    const bool restart = RestartRequested();
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, kMutexName);
+    if (!mutex) return 1;
+    const bool already_running = GetLastError() == ERROR_ALREADY_EXISTS;
+    if (already_running) {
         if (const HWND existing = FindWindowW(kWindowClass, kWindowTitle)) {
-            PostMessageW(existing, kShowMessage, 0, 0);
+            PostMessageW(existing, restart ? kRestartMessage : kShowMessage, 0, 0);
         }
-        if (mutex) CloseHandle(mutex);
-        return 0;
+        const DWORD wait = restart ? WaitForSingleObject(mutex, 5000) : WAIT_TIMEOUT;
+        if (!restart || (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED)) {
+            CloseHandle(mutex);
+            return 0;
+        }
+    } else if (WaitForSingleObject(mutex, 0) != WAIT_OBJECT_0) {
+        CloseHandle(mutex);
+        return 1;
     }
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(com)) { CloseHandle(mutex); return 1; }
     g_app.instance = instance;
     g_app.port = ParsePort();
     g_app.taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
-    const bool restored_settings = LoadSettings();
-    if (!restored_settings) {
-        const float dpi_scale = static_cast<float>(GetDpiForSystem()) / 96.0F;
-        const auto extent = ScaleWindowExtent(
-            g_app.settings.width, g_app.settings.height,
-            dpi_scale, g_app.settings.ui_scale);
-        g_app.settings.width = extent.width;
-        g_app.settings.height = extent.height;
-    }
+    static_cast<void>(LoadSettings());
     if (!InitializeRendering()) { CoUninitialize(); CloseHandle(mutex); return 2; }
 
     WNDCLASSEXW window_class{sizeof(window_class)};
@@ -888,16 +918,24 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     window_class.lpszClassName = kWindowClass;
     if (!RegisterClassExW(&window_class)) { CoUninitialize(); CloseHandle(mutex); return 3; }
-    const int height = g_app.settings.collapsed
-        ? ScaleWindowExtent(1, 34,
-            static_cast<float>(GetDpiForSystem()) / 96.0F,
-            g_app.settings.ui_scale).height
-        : g_app.settings.height;
+    const auto initial_extent = ScaleWindowExtent(
+        g_app.settings.width,
+        g_app.settings.collapsed ? 34 : g_app.settings.height,
+        static_cast<float>(GetDpiForSystem()) / 96.0F,
+        g_app.settings.ui_scale);
     g_app.window = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW,
         kWindowClass, kWindowTitle, WS_POPUP | WS_THICKFRAME,
-        g_app.settings.x, g_app.settings.y, g_app.settings.width, height,
+        g_app.settings.x, g_app.settings.y, initial_extent.width, initial_extent.height,
         nullptr, nullptr, instance, nullptr);
     if (!g_app.window) { CoUninitialize(); CloseHandle(mutex); return 4; }
+    const auto monitor_extent = ScaleWindowExtent(
+        g_app.settings.width,
+        g_app.settings.collapsed ? 34 : g_app.settings.height,
+        static_cast<float>(GetDpiForWindow(g_app.window)) / 96.0F,
+        g_app.settings.ui_scale);
+    SetWindowPos(g_app.window, nullptr, 0, 0,
+        monitor_extent.width, monitor_extent.height,
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     ApplyWindowMode();
     RegisterHotKey(g_app.window, kHotkeyId, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_F12);
     ShowWindow(g_app.window, SW_SHOWNOACTIVATE);

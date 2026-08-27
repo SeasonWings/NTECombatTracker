@@ -1,9 +1,11 @@
 #include "overlay_protocol.hpp"
 
 #include <charconv>
+#include <cmath>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <system_error>
+#include <utility>
 
 namespace nte::combat_stats {
 namespace {
@@ -41,6 +43,13 @@ EncounterState ParseState(const std::string& state) {
     if (state == "active") return EncounterState::Active;
     if (state == "completed") return EncounterState::Completed;
     throw std::runtime_error("encounter.state is invalid");
+}
+
+void ValidateRate(const Json& value, const double expected, const char* field) {
+    const double actual = value.get<double>();
+    if (!std::isfinite(actual) || std::abs(actual - expected) > 0.000001) {
+        throw std::runtime_error(std::string(field) + " is inconsistent with hit counts");
+    }
 }
 
 Json PlayerToJson(const PlayerRow& row) {
@@ -85,6 +94,12 @@ PlayerRow PlayerFromJson(const Json& value) {
         value.at("head_hits"), "players.head_hits");
     row.weak_hits = ParseDecimal<std::uint64_t>(
         value.at("weak_hits"), "players.weak_hits");
+    ValidateRate(value.at("critical_rate"), PlayerCriticalRate(row),
+        "players.critical_rate");
+    ValidateRate(value.at("head_rate"), PlayerHeadRate(row),
+        "players.head_rate");
+    ValidateRate(value.at("weak_rate"), PlayerWeakRate(row),
+        "players.weak_rate");
     row.maximum_hit = ParseDecimal<std::int64_t>(
         value.at("maximum_hit"), "players.maximum_hit");
     const Json& ability = value.at("maximum_ability");
@@ -99,6 +114,23 @@ PlayerRow PlayerFromJson(const Json& value) {
 }
 
 }  // namespace
+
+NteOverlaySnapshot::NteOverlaySnapshot(Data data)
+    : producer_instance_id(std::move(data.producer_instance_id)),
+      snapshot_sequence(data.snapshot_sequence),
+      latest_damage_sequence(data.latest_damage_sequence),
+      sent_utc_ms(data.sent_utc_ms),
+      producer_stopping(data.producer_stopping),
+      capture_available(data.capture_available),
+      capture_status(std::move(data.capture_status)),
+      report_id(std::move(data.report_id)),
+      encounter_id(std::move(data.encounter_id)),
+      primary_target(std::move(data.primary_target)),
+      websocket_port(data.websocket_port),
+      connected_clients(data.connected_clients),
+      published_messages(data.published_messages),
+      transport_dropped_messages(data.transport_dropped_messages),
+      combat(std::move(data.combat)) {}
 
 std::string SerializeOverlaySnapshot(const NteOverlaySnapshot& snapshot) {
     Json players = Json::array();
@@ -175,7 +207,7 @@ std::optional<NteOverlaySnapshot> ParseOverlaySnapshot(
         if (message_type != "snapshot" && message_type != "producer_stopping") {
             throw std::runtime_error("overlay message type is not supported");
         }
-        NteOverlaySnapshot result;
+        NteOverlaySnapshot::Data result;
         result.producer_stopping = message_type == "producer_stopping";
         result.producer_instance_id = document.at("producer_instance_id").get<std::string>();
         result.snapshot_sequence = ParseDecimal<std::uint64_t>(
@@ -224,7 +256,7 @@ std::optional<NteOverlaySnapshot> ParseOverlaySnapshot(
             transport.at("published_messages"), "transport.published_messages");
         result.transport_dropped_messages = ParseDecimal<std::uint64_t>(
             transport.at("dropped_messages"), "transport.dropped_messages");
-        return result;
+        return NteOverlaySnapshot(std::move(result));
     } catch (const std::exception& exception) {
         error = exception.what();
         return std::nullopt;

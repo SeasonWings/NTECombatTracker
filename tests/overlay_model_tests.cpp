@@ -40,7 +40,8 @@ void SortsEachSupportedMetricStably() {
     Check(damage[0].label == "Alpha" && damage[1].label == "Gamma",
           "equal metrics use character label as deterministic tie breaker");
     const auto crit = SortPlayers(players, SortColumn::CriticalRate, true);
-    Check(crit[0].label == "Gamma" && std::abs(CriticalRate(crit[0]) - 75.0) < 0.01,
+    Check(crit[0].label == "Gamma" &&
+              std::abs(PlayerCriticalRate(crit[0]) - 75.0) < 0.01,
           "critical rate is sortable");
     const auto active = SortPlayers(players, SortColumn::ActiveDps, false);
     Check(active[0].label == "Alpha" && active[2].label == "Beta",
@@ -85,6 +86,13 @@ void WindowExtentPreservesLogicalSizeAcrossDpiAndUiScale() {
     const auto dpi200WithUiScale = ScaleWindowExtent(520, 220, 2.0F, 1.25F);
     Check(dpi200WithUiScale.width == 1300 && dpi200WithUiScale.height == 550,
           "DPI and user interface scaling compose without clipping rows");
+
+    const auto restored_logical = UnscaleWindowExtent(780, 330, 1.5F, 1.0F);
+    const auto restored_at_200 = ScaleWindowExtent(
+        restored_logical.width, restored_logical.height, 2.0F, 1.0F);
+    Check(restored_logical.width == 520 && restored_logical.height == 220 &&
+              restored_at_200.width == 1040 && restored_at_200.height == 440,
+          "persisted logical dimensions restore correctly on a different DPI monitor");
 }
 
 }  // namespace
