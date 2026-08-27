@@ -883,6 +883,29 @@ bool RestartRequested() {
     return restart;
 }
 
+bool TerminateMatchingOverlay(const HWND window) {
+    if (!window) return false;
+    DWORD process_id{};
+    GetWindowThreadProcessId(window, &process_id);
+    if (process_id == 0) return false;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION |
+        PROCESS_TERMINATE | SYNCHRONIZE, FALSE, process_id);
+    if (!process) return false;
+    std::array<wchar_t, 32768> target_path{};
+    std::array<wchar_t, 32768> current_path{};
+    DWORD target_size = static_cast<DWORD>(target_path.size());
+    const bool same_executable = QueryFullProcessImageNameW(
+            process, 0, target_path.data(), &target_size) != FALSE &&
+        GetModuleFileNameW(nullptr, current_path.data(),
+            static_cast<DWORD>(current_path.size())) != 0 &&
+        _wcsicmp(target_path.data(), current_path.data()) == 0;
+    const bool terminated = same_executable &&
+        TerminateProcess(process, ERROR_PROCESS_ABORTED) != FALSE;
+    if (terminated) static_cast<void>(WaitForSingleObject(process, 2000));
+    CloseHandle(process);
+    return terminated;
+}
+
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
@@ -892,10 +915,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (!mutex) return 1;
     const bool already_running = GetLastError() == ERROR_ALREADY_EXISTS;
     if (already_running) {
-        if (const HWND existing = FindWindowW(kWindowClass, kWindowTitle)) {
+        const HWND existing = FindWindowW(kWindowClass, kWindowTitle);
+        if (existing) {
             PostMessageW(existing, restart ? kRestartMessage : kShowMessage, 0, 0);
         }
-        const DWORD wait = restart ? WaitForSingleObject(mutex, 5000) : WAIT_TIMEOUT;
+        DWORD wait = restart ? WaitForSingleObject(mutex, 5000) : WAIT_TIMEOUT;
+        if (restart && wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED &&
+            TerminateMatchingOverlay(existing)) {
+            wait = WaitForSingleObject(mutex, 2000);
+        }
         if (!restart || (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED)) {
             CloseHandle(mutex);
             return 0;
