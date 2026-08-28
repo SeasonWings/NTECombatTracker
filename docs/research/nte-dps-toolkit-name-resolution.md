@@ -1,8 +1,8 @@
 # `nte-dps-toolkit` 抓包名称解析链路
 
-> 调研日期：2026-08-28（Asia/Shanghai）  
-> 调研对象：[`kongbaiz/nte-dps-toolkit`](https://github.com/kongbaiz/nte-dps-toolkit)  
-> 代码基线：[`bff9f569ae19fc659b61a3a810407c01be5fc71a`](https://github.com/kongbaiz/nte-dps-toolkit/tree/bff9f569ae19fc659b61a3a810407c01be5fc71a)  
+> 调研日期：2026-08-28（Asia/Shanghai）<br>
+> 调研对象：[`kongbaiz/nte-dps-toolkit`](https://github.com/kongbaiz/nte-dps-toolkit)<br>
+> 代码基线：[`bff9f569ae19fc659b61a3a810407c01be5fc71a`](https://github.com/kongbaiz/nte-dps-toolkit/tree/bff9f569ae19fc659b61a3a810407c01be5fc71a)
 > 来源范围：仅使用该仓库的 README、源码、随包资源和提交历史。
 
 ## 结论
