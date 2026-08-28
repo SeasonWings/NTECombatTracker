@@ -6,13 +6,19 @@ Anomaly v1.7.0 的只读游戏内战斗统计、本地日志和纯 Win32 Overlay
 
 环境要求：Windows x64、Visual Studio 2022 C++ Build Tools、CMake 3.22+，以及 Anomaly v1.7.0 SDK。
 
+统一使用打包脚本完成 Release 配置、构建、测试、插件校验和归档：
+
 ```powershell
-cmake --preset default -DAnomalySDK_DIR=C:/AnomalySDK/lib/cmake/AnomalySDK
-cmake --build --preset release
-ctest --preset release
+.\script\package.ps1 `
+  -AnomalySdkDir C:\AnomalySDK\lib\cmake\AnomalySDK `
+  -AnomalyPluginTool C:\AnomalyTools\anomaly-plugin.exe
 ```
 
-插件包生成在 `build/package/NteCombatStats/`，同时生成 ZIP。ZIP 内不额外嵌套目录，结构固定为：
+也可以通过 `ANOMALY_SDK_DIR` 和 `ANOMALY_PLUGIN_TOOL` 环境变量提供路径。只有明确无法使用校验工具时才传入 `-SkipValidation`。
+
+脚本默认清理并重建仓库根目录下的 `build/`，避免不同 CMake 生成器或旧包文件相互污染；确认现有缓存兼容时可传入 `-Incremental`。
+
+全部配置、编译和打包暂存文件位于 `build/`；可校验插件目录为 `build/package/NteCombatStats/`。唯一最终交付物输出到 `dist/NteCombatStats-<version>-Release.zip`。ZIP 内不额外嵌套目录，结构固定为：
 
 ```text
 ├── locales/
@@ -23,7 +29,7 @@ ctest --preset release
 └── plugin.dll
 ```
 
-部署前可执行：
+脚本默认已经执行 `ctest` 和插件包校验。需要单独复查暂存包时可执行：
 
 ```powershell
 anomaly-plugin validate .\build\package\NteCombatStats

@@ -130,36 +130,37 @@ if(NTE_COMBAT_STATS_BUILD_PLUGIN)
         target_compile_options(nte_combat_stats PRIVATE /W4 /permissive- /EHsc /utf-8)
         target_link_options(nte_combat_stats PRIVATE /INCREMENTAL:NO)
     endif()
-    add_custom_target(nte_combat_stats_package ALL
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${NTE_COMBAT_STATS_PACKAGE_DIR}"
-        COMMAND "${CMAKE_COMMAND}" -E make_directory
-                "${NTE_COMBAT_STATS_PACKAGE_DIR}/locales"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "$<TARGET_FILE:nte_combat_stats>"
-                "${NTE_COMBAT_STATS_PACKAGE_DIR}/plugin.dll"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${CMAKE_CURRENT_SOURCE_DIR}/manifest.json"
-                "${NTE_COMBAT_STATS_PACKAGE_DIR}/manifest.json"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${CMAKE_CURRENT_SOURCE_DIR}/locales/zh-CN.json"
-                "${NTE_COMBAT_STATS_PACKAGE_DIR}/locales/zh-CN.json"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "$<TARGET_FILE:NteCombatOverlay>"
-                "${NTE_COMBAT_STATS_PACKAGE_DIR}/NteCombatOverlay.exe"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.txt"
-                "${NTE_COMBAT_STATS_PACKAGE_DIR}/THIRD_PARTY_NOTICES.txt"
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/script/package-files.txt"
+        NTE_COMBAT_STATS_PACKAGE_FILES)
+    set(NTE_COMBAT_STATS_PACKAGE_COMMANDS)
+    foreach(package_file IN LISTS NTE_COMBAT_STATS_PACKAGE_FILES)
+        if(IS_ABSOLUTE "${package_file}" OR package_file MATCHES "(^|/)\\.\\.(/|$)")
+            message(FATAL_ERROR "Invalid package path: ${package_file}")
+        endif()
+        if(package_file STREQUAL "plugin.dll")
+            set(package_source "$<TARGET_FILE:nte_combat_stats>")
+        elseif(package_file STREQUAL "NteCombatOverlay.exe")
+            set(package_source "$<TARGET_FILE:NteCombatOverlay>")
+        else()
+            set(package_source "${CMAKE_CURRENT_SOURCE_DIR}/${package_file}")
+        endif()
+        get_filename_component(package_parent "${package_file}" DIRECTORY)
+        if(package_parent)
+            set(package_destination_directory
+                "${NTE_COMBAT_STATS_PACKAGE_DIR}/${package_parent}")
+        else()
+            set(package_destination_directory "${NTE_COMBAT_STATS_PACKAGE_DIR}")
+        endif()
+        list(APPEND NTE_COMBAT_STATS_PACKAGE_COMMANDS
+            COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "${package_destination_directory}"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${package_source}"
+                    "${NTE_COMBAT_STATS_PACKAGE_DIR}/${package_file}")
+    endforeach()
+    add_custom_target(nte_combat_stats_package
+        ${NTE_COMBAT_STATS_PACKAGE_COMMANDS}
         DEPENDS nte_combat_stats NteCombatOverlay
         COMMENT "Assembling NTE Combat Stats plugin package"
-        VERBATIM)
-    add_custom_target(nte_combat_stats_zip ALL
-        COMMAND "${CMAKE_COMMAND}" -E tar cf
-                "${CMAKE_BINARY_DIR}/NteCombatStats-${PROJECT_VERSION}-$<CONFIG>.zip"
-                --format=zip
-                manifest.json plugin.dll NteCombatOverlay.exe
-                THIRD_PARTY_NOTICES.txt locales/zh-CN.json
-        WORKING_DIRECTORY "${NTE_COMBAT_STATS_PACKAGE_DIR}"
-        DEPENDS nte_combat_stats_package
-        COMMENT "Creating flat-root NTE Combat Stats ZIP"
         VERBATIM)
 endif()

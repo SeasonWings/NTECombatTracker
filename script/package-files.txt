@@ -1,0 +1,5 @@
+manifest.json
+NteCombatOverlay.exe
+plugin.dll
+THIRD_PARTY_NOTICES.txt
+locales/zh-CN.json
