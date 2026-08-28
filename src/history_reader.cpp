@@ -127,7 +127,8 @@ std::unordered_map<std::uint32_t, ActorName> LoadActors(
         const Json value = Json::parse(line);
         const std::uint32_t id = value.at("actor_id").get<std::uint32_t>();
         const auto& handle = value.at("handle");
-        const std::string technical = value.at("path").get<std::string>();
+        const std::string technical = value.value(
+            "technical_name", value.at("path").get<std::string>());
         result.emplace(id, ActorName{
             Handle{Decimal<std::uint64_t>(handle.at("id")),
                    Decimal<std::uint64_t>(handle.at("generation"))},
@@ -147,7 +148,8 @@ std::unordered_map<std::uint32_t, AbilityName> LoadAbilities(
     while (std::getline(stream, line)) {
         if (line.empty()) continue;
         const Json value = Json::parse(line);
-        const std::string technical = value.at("name").get<std::string>();
+        const std::string technical = value.value(
+            "technical_name", value.at("name").get<std::string>());
         result.emplace(value.at("ability_id").get<std::uint32_t>(), AbilityName{
             Decimal<std::uint64_t>(value.at("source_id")),
             technical, value.value("display_name", ShortName(technical)),

@@ -51,6 +51,7 @@ anomaly-test-host --plugin .\build\package\NteCombatStats --reload 10 --ticks 60
 - 数据来自客户端 `CharacterOnDamaged` 广播，不是服务端权威战斗日志。
 - 插件严格只读，不申请内存读写、技能调用或外部网络能力。本地 Overlay 只连接 Runtime 的 `127.0.0.1` WebSocket 广播。
 - 角色和伤害来源仍由 SDK 提供完整技术路径；插件只使用包内 `res` 将技术路径补充为中文显示名，名称不会参与统计身份、聚合或去重。
+- 资源校验要求角色 ID 与 codename 唯一；上游当前有不同角色形态共享“「零」”或“安魂曲”显示名，因此这两个已核验名称允许重复，身份仍由完整技术路径和角色 ID 区分。
 
 ## Win32 Overlay
 

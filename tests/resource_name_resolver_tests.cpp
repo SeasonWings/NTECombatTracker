@@ -1,6 +1,9 @@
 #include "resource_name_resolver.hpp"
 
+#include <array>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 
 namespace {
@@ -82,6 +85,75 @@ void MissingResourcesDegradeSafely() {
         "damage-source fallback should preserve the compact GE identifier");
 }
 
+void CorruptAndAmbiguousResourcesDegradeSafely() {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto root = std::filesystem::temp_directory_path() /
+        ("nte-resource-name-test-" + std::to_string(nonce));
+    const auto source = std::filesystem::path(NTE_TEST_SOURCE_DIR) / "res";
+    constexpr std::array required{
+        "data/asset_manifest.json",
+        "data/characters/characters.json",
+        "data/enemies/enemies.json",
+        "data/skills/skill_damage.json",
+        "data/skills/ability_tips.json",
+        "data/skills/gameplay_effect_semantics.json"};
+    for (const auto relative : required) {
+        const auto destination = root / relative;
+        std::filesystem::create_directories(destination.parent_path());
+        std::filesystem::copy_file(source / relative, destination);
+    }
+    {
+        std::ofstream characters(root / "data/characters/characters.json",
+            std::ios::binary | std::ios::trunc);
+        characters << R"({"characters":{"1001":{"codename":"Shared","name_zh":"甲"},"1002":{"codename":"shared","name_zh":"乙"}}})";
+    }
+    std::string error;
+    auto resolver = nte::combat_stats::ResourceNameResolver::Load(root, error);
+    Check(error.empty(), "runtime loading should tolerate ambiguous codenames safely");
+    const auto ambiguous = resolver.ResolveParticipant("Player_999_Shared_C");
+    Check(ambiguous.origin == nte::combat_stats::DisplayNameOrigin::Technical,
+        "ambiguous codename fallback must not guess a Chinese character name");
+    Check(resolver.ResolveDamageSource("Default__GE-Bad-Path_C").origin ==
+              nte::combat_stats::DisplayNameOrigin::Technical,
+        "malformed GE paths should use technical-name fallback");
+
+    {
+        std::ofstream abilities(root / "data/skills/ability_tips.json",
+            std::ios::binary | std::ios::trunc);
+        abilities << "{invalid";
+    }
+    resolver = nte::combat_stats::ResourceNameResolver::Load(root, error);
+    Check(!error.empty() && resolver.version().empty(),
+        "corrupt resources should reject the set and expose a quality error");
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+
+void SanitizedSdkSourceRegressionKeepsPlayerCoverage() {
+    std::string error;
+    const auto resolver = nte::combat_stats::ResourceNameResolver::Load(
+        std::filesystem::path(NTE_TEST_SOURCE_DIR) / "res", error);
+    std::ifstream sources(std::filesystem::path(NTE_TEST_SOURCE_DIR) /
+        "tests/fixtures/sdk-source-names.txt", std::ios::binary);
+    std::size_t total{};
+    std::size_t player_related{};
+    std::size_t localized_player_related{};
+    std::string name;
+    while (std::getline(sources, name)) {
+        if (name.empty()) continue;
+        ++total;
+        const bool player = !name.starts_with("GE_Boss_");
+        if (player) ++player_related;
+        const auto resolved = resolver.ResolveDamageSource(name);
+        if (player && resolved.origin ==
+                nte::combat_stats::DisplayNameOrigin::Resource) {
+            ++localized_player_related;
+        }
+    }
+    Check(total == 52 && player_related == 48 && localized_player_related == 48,
+        "the sanitized SDK sample should localize all 48 player-related sources");
+}
+
 void UnknownNamesFallBackWithoutChangingIdentity() {
     std::string error;
     const auto resolver = nte::combat_stats::ResourceNameResolver::Load(
@@ -105,6 +177,8 @@ int main() {
     RepositoryResourcesResolveSdkTechnicalPaths();
     UnknownNamesFallBackWithoutChangingIdentity();
     MissingResourcesDegradeSafely();
+    CorruptAndAmbiguousResourcesDegradeSafely();
+    SanitizedSdkSourceRegressionKeepsPlayerCoverage();
     if (failures != 0) return 1;
     std::cout << "All resource name resolver tests passed\n";
     return 0;

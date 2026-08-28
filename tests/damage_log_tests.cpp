@@ -189,6 +189,10 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
           ReadAll(report_path / "abilities.jsonl").find(
               "\"display_name\":\"技能甲\"") != std::string::npos &&
           ReadAll(report_path / "actors.jsonl").find(
+              "\"technical_name\":\"Actor/A\"") != std::string::npos &&
+          ReadAll(report_path / "abilities.jsonl").find(
+              "\"technical_name\":\"Skill \\\"A\\\"\"") != std::string::npos &&
+          ReadAll(report_path / "actors.jsonl").find(
               "\"name_resource_version\":\"2026.08.28\"") != std::string::npos &&
           ReadAll(report_path / "abilities.jsonl").find(
               "\"name_resource_version\":\"2026.08.28\"") != std::string::npos,

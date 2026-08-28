@@ -523,6 +523,7 @@ struct DamageLogRepository::Impl {
                 Decimal(actor->handle.generation) + "},\"path\":" +
                 Quoted(actor->path) + ",\"resolution_status\":" +
                 Quoted(actor->path.starts_with("Unknown") ? "unknown" : "resolved") +
+                ",\"technical_name\":" + Quoted(actor->path) +
                 ",\"display_name\":" + Quoted(actor->display_name) +
                 ",\"name_origin\":" + Quoted(actor->name_origin) +
                 ",\"name_resource_version\":" + Quoted(actor->resource_version) + "}\n";
@@ -547,6 +548,7 @@ struct DamageLogRepository::Impl {
                 Decimal(ability->source_id) + ",\"name\":" +
                 Quoted(ability->name) + ",\"resolution_status\":" +
                 Quoted(ability->name.starts_with("Unknown") ? "unknown" : "resolved") +
+                ",\"technical_name\":" + Quoted(ability->name) +
                 ",\"display_name\":" + Quoted(ability->display_name) +
                 ",\"name_origin\":" + Quoted(ability->name_origin) +
                 ",\"name_resource_version\":" + Quoted(ability->resource_version) + "}\n";
