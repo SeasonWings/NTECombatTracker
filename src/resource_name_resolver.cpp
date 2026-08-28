@@ -21,8 +21,12 @@ struct CharacterEntry {
 struct EffectEntry {
     std::string ability;
     std::string component_name;
-    bool show_parent_ability{true};
-    bool explicitly_shows_parent{};
+    std::optional<bool> show_parent_ability;
+};
+
+struct DamageSkillEntry {
+    std::string technical_name;
+    std::string ability;
 };
 
 [[nodiscard]] nlohmann::json ReadJson(const std::filesystem::path& path) {
@@ -71,7 +75,7 @@ struct EffectEntry {
     auto candidate = marker == std::string_view::npos
         ? CompactTechnicalName(path)
         : std::string(path.substr(marker + 10));
-    if (candidate.starts_with("Default__")) candidate.erase(0, 9);
+    if (Lower(candidate).starts_with("default__")) candidate.erase(0, 9);
     candidate = StripClassSuffix(std::move(candidate));
     return IsIdentifier(candidate) && Lower(candidate).starts_with("ge_")
         ? candidate
@@ -84,7 +88,7 @@ struct ResourceNameResolver::Entries {
     std::unordered_map<std::uint32_t, CharacterEntry> characters_by_id;
     std::unordered_map<std::string, std::vector<std::uint32_t>> character_ids_by_codename;
     std::unordered_map<std::string, std::string> enemies;
-    std::unordered_map<std::string, std::string> effect_abilities;
+    std::unordered_map<std::string, DamageSkillEntry> damage_skills;
     std::unordered_map<std::string, std::string> ability_names;
     std::unordered_map<std::string, EffectEntry> effect_semantics;
 };
@@ -157,7 +161,8 @@ ResourceNameResolver ResourceNameResolver::Load(
         for (const auto& [effect, value] : damage.front().at("Rows").items()) {
             if (const auto ability = value.find("GAName"); ability != value.end() &&
                 ability->is_string() && !ability->get_ref<const std::string&>().empty()) {
-                entries->effect_abilities.emplace(effect, ability->get<std::string>());
+                entries->damage_skills.emplace(Lower(effect), DamageSkillEntry{
+                    effect, ability->get<std::string>()});
             }
         }
         stage = "ability tip entries";
@@ -172,9 +177,8 @@ ResourceNameResolver ResourceNameResolver::Load(
             entry.component_name = value.value("damage_name_zh", std::string{});
             if (const auto show = value.find("show_parent_ability"); show != value.end()) {
                 entry.show_parent_ability = show->get<bool>();
-                entry.explicitly_shows_parent = entry.show_parent_ability;
             }
-            entries->effect_semantics.emplace(effect, std::move(entry));
+            entries->effect_semantics.emplace(Lower(effect), std::move(entry));
         }
         result.entries_ = std::move(entries);
     } catch (const std::exception& exception) {
@@ -254,22 +258,27 @@ ResolvedDamageName ResourceNameResolver::ResolveDamageSource(
     }
     result.gameplay_effect_name = ExtractGameplayEffect(technical_path);
     if (!entries_ || result.gameplay_effect_name.empty()) {
-        result.display_name = CompactTechnicalName(technical_path);
+        result.display_name = result.gameplay_effect_name.empty()
+            ? CompactTechnicalName(technical_path)
+            : result.gameplay_effect_name;
         result.origin = DisplayNameOrigin::Technical;
         return result;
     }
 
-    if (const auto found = entries_->effect_abilities.find(result.gameplay_effect_name);
-        found != entries_->effect_abilities.end()) {
-        result.ability_name = found->second;
+    const auto effect_key = Lower(result.gameplay_effect_name);
+    if (const auto found = entries_->damage_skills.find(effect_key);
+        found != entries_->damage_skills.end()) {
+        result.gameplay_effect_name = found->second.technical_name;
+        result.ability_name = found->second.ability;
     }
     std::string component;
     bool show_parent = true;
-    if (const auto found = entries_->effect_semantics.find(result.gameplay_effect_name);
+    if (const auto found = entries_->effect_semantics.find(effect_key);
         found != entries_->effect_semantics.end()) {
         component = found->second.component_name;
-        show_parent = found->second.show_parent_ability;
-        if ((result.ability_name.empty() || found->second.explicitly_shows_parent) &&
+        show_parent = found->second.show_parent_ability.value_or(true);
+        if ((result.ability_name.empty() ||
+             found->second.show_parent_ability == true) &&
             !found->second.ability.empty()) {
             result.ability_name = found->second.ability;
         }

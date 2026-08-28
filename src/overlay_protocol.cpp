@@ -157,7 +157,8 @@ PlayerRow PlayerFromJson(const Json& value) {
         "name_origin", std::string{"technical"});
     row.maximum_source_resource_version = ability.value(
         "name_resource_version",
-        ability.value("catalog_version", std::string{}));
+        ability.value("name_catalog_version",
+            ability.value("catalog_version", std::string{})));
     row.damage_share = value.at("damage_share").get<double>();
     row.encounter_dps = value.at("encounter_dps").get<double>();
     row.active_dps = value.at("active_dps").get<double>();

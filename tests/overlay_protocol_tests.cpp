@@ -66,6 +66,7 @@ NteOverlaySnapshot ExampleSnapshot() {
     player.maximum_source_id = std::numeric_limits<std::uint64_t>::max() - 2;
     player.maximum_source_name = "终结技\"A\"";
     player.maximum_source_display_name = "终结技甲";
+    player.maximum_source_resource_version = "2026.08.28";
     player.damage_share = 70.0;
     player.encounter_dps = 56.0;
     player.active_dps = 70.0;
@@ -155,7 +156,9 @@ void ParserAcceptsLegacyNameCatalogVersion() {
     std::string error;
     const auto parsed = nte::combat_stats::ParseOverlaySnapshot(json, error);
     Check(parsed.has_value() && error.empty() &&
-              parsed->combat.players[0].name_resource_version == "2026.08.28",
+              parsed->combat.players[0].name_resource_version == "2026.08.28" &&
+              parsed->combat.players[0].maximum_source_resource_version ==
+                  "2026.08.28",
         "protocol v1 should continue reading the legacy name catalog version field");
 }
 

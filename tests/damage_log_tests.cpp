@@ -74,14 +74,14 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
         event.reaction_display_type = 7;
         event.source_name = "Skill \"A\"";
         event.source_display_name = "技能甲";
-        event.source_name_origin = "catalog";
+        event.source_name_origin = "resource";
         event.name_resource_version = "2026.08.28";
         event.attacker_name = "Actor/A";
         event.attacker_display_name = "角色甲";
-        event.attacker_name_origin = "catalog";
+        event.attacker_name_origin = "resource";
         event.victim_name = "Actor/B";
         event.victim_display_name = "目标乙";
-        event.victim_name_origin = "catalog";
+        event.victim_name_origin = "resource";
         Check(repository.Append(LoggedDamage{
                   event, 1'700'000'000'200, 200'000, true}, error),
               "damage should append");
@@ -99,7 +99,7 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
         player.object_path = event.attacker_name;
         player.label = "Actor/A";
         player.display_name = "角色甲";
-        player.name_origin = "catalog";
+        player.name_origin = "resource";
         player.name_resource_version = "2026.08.28";
         player.damage = 100;
         player.positive_hits = 1;
@@ -141,9 +141,12 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
           "64-bit source id should be encoded as a decimal string");
     Check(events.find("\"source_name\":\"Skill \\\"A\\\"\"") != std::string::npos,
           "JSON strings should be escaped");
-    Check(events.find("\"source_name_origin\":\"catalog\"") != std::string::npos &&
-              events.find("\"attacker_name_origin\":\"catalog\"") != std::string::npos &&
-              events.find("\"victim_name_origin\":\"catalog\"") != std::string::npos,
+    Check(events.find("\"source_name_origin\":\"resource\"") != std::string::npos &&
+              events.find("\"attacker_name_origin\":\"resource\"") != std::string::npos &&
+              events.find("\"victim_name_origin\":\"resource\"") != std::string::npos &&
+              events.find("\"name_resource_version\":\"2026.08.28\"") !=
+                  std::string::npos &&
+              events.find("name_catalog_version") == std::string::npos,
           "events should retain display-name origins for historical priority");
     Check(!events.empty() && events.back() == '\n', "JSONL should end with a newline");
     const std::string encounters = ReadAll(report_path / "encounters.jsonl");
@@ -184,7 +187,11 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
     Check(ReadAll(report_path / "actors.jsonl").find(
               "\"display_name\":\"角色甲\"") != std::string::npos &&
           ReadAll(report_path / "abilities.jsonl").find(
-              "\"display_name\":\"技能甲\"") != std::string::npos,
+              "\"display_name\":\"技能甲\"") != std::string::npos &&
+          ReadAll(report_path / "actors.jsonl").find(
+              "\"name_resource_version\":\"2026.08.28\"") != std::string::npos &&
+          ReadAll(report_path / "abilities.jsonl").find(
+              "\"name_resource_version\":\"2026.08.28\"") != std::string::npos,
           "actor and ability dictionaries should persist localized display metadata");
     Check(ReadAll(report_path / "actors.jsonl").find(
               "\"actor_id\":0") != std::string::npos &&

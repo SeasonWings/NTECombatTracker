@@ -45,10 +45,20 @@ void RepositoryResourcesResolveSdkTechnicalPaths() {
                   "普通攻击：特种格斗术 · 即瞬猛袭追加伤害" &&
               damage.origin == nte::combat_stats::DisplayNameOrigin::Resource,
         "GE should resolve through skill damage, ability tips, and component semantics");
+    const auto mixed_case = resolver.ResolveDamageSource(
+        "default__ge_player_shinku_watchex_damage_c");
+    Check(mixed_case.display_name == damage.display_name &&
+              mixed_case.gameplay_effect_name == damage.gameplay_effect_name,
+        "GE resource matching should be case-insensitive and return the canonical name");
     const auto hidden_parent = resolver.ResolveDamageSource(
         "Default__GE_Player_Mint_Skill4_Damage_New_C");
     Check(hidden_parent.display_name == "极限反击：焦糖脆片",
         "show_parent_ability=false should display only the Chinese component name");
+    const auto semantic_parent = resolver.ResolveDamageSource(
+        "GE_ActorReaction_1_1019_Damage");
+    Check(semantic_parent.ability_name == "GA_Oneiroi_Passive_1" &&
+              semantic_parent.display_name == "镜象 · 复制创生花",
+        "an explicit semantic parent should override the skill-damage GA mapping");
     const auto unmapped = resolver.ResolveDamageSource("GE_Boss_Unmapped_Damage");
     Check(unmapped.display_name == "GE_Boss_Unmapped_Damage" &&
               unmapped.origin == nte::combat_stats::DisplayNameOrigin::Technical,
@@ -65,6 +75,11 @@ void MissingResourcesDegradeSafely() {
     Check(fallback.display_name == "Player_076_shinku_C" &&
               fallback.origin == nte::combat_stats::DisplayNameOrigin::Technical,
         "a failed resource load must still allow safe technical-name fallback");
+    const auto source = resolver.ResolveDamageSource(
+        "Default__GE_Player_Shinku_WatchEx_Damage_C");
+    Check(source.display_name == "GE_Player_Shinku_WatchEx_Damage" &&
+              source.origin == nte::combat_stats::DisplayNameOrigin::Technical,
+        "damage-source fallback should preserve the compact GE identifier");
 }
 
 void UnknownNamesFallBackWithoutChangingIdentity() {

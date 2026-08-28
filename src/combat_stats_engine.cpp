@@ -265,7 +265,9 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
                 event.final_damage, other_outgoing_source_, quality_.aggregate_truncated,
                 quality_.overflow);
             AddBoundedAggregate(
-                outgoing_targets_, event.victim, event.victim_name,
+                outgoing_targets_, event.victim,
+                event.victim_display_name.empty()
+                    ? event.victim_name : event.victim_display_name,
                 event.final_damage, other_outgoing_target_, quality_.aggregate_truncated,
                 quality_.overflow);
             if (outgoing_player != nullptr) {

@@ -154,13 +154,21 @@ function Test-NameResources {
     $characterIds = [System.Collections.Generic.HashSet[uint32]]::new()
     $codenames = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase)
+    $chineseNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    # The upstream resource intentionally shares these display names between
+    # distinct playable forms. All other duplicate Chinese names are rejected.
+    $allowedSharedChineseNames = [System.Collections.Generic.HashSet[string]]::new(
+        [string[]]@('「零」', '安魂曲'), [System.StringComparer]::Ordinal)
     foreach ($entry in $characters.GetEnumerator()) {
         [uint32]$characterId = 0
         if (-not [uint32]::TryParse($entry.Key, [ref]$characterId) -or
             -not $characterIds.Add($characterId) -or
             [string]::IsNullOrWhiteSpace($entry.Value.codename) -or
             -not $codenames.Add([string]$entry.Value.codename) -or
-            [string]::IsNullOrWhiteSpace($entry.Value.name_zh)) {
+            [string]::IsNullOrWhiteSpace($entry.Value.name_zh) -or
+            (-not $chineseNames.Add([string]$entry.Value.name_zh) -and
+             -not $allowedSharedChineseNames.Contains([string]$entry.Value.name_zh))) {
             throw "Invalid or duplicate character resource entry: $($entry.Key)"
         }
     }
@@ -182,6 +190,21 @@ function Test-NameResources {
     if ($null -eq $damage.Rows -or $null -eq $abilityTips -or $null -eq $semantics) {
         throw 'GE, GA, or gameplay effect semantic resources have invalid root types.'
     }
+    foreach ($effect in $damage.Rows.GetEnumerator()) {
+        if ($effect.Key -notmatch '^[A-Za-z][A-Za-z0-9_]*$' -or
+            -not $effect.Value.Contains('GAName') -or
+            $effect.Value.GAName -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($effect.Value.GAName)) {
+            throw "Invalid GE to GA mapping: $($effect.Key)"
+        }
+    }
+    foreach ($ability in $abilityTips.GetEnumerator()) {
+        if (-not $ability.Key.StartsWith('GA_', [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not $ability.Value.Contains('name_zh') -or
+            $ability.Value.name_zh -isnot [string]) {
+            throw "Invalid ability tip entry: $($ability.Key)"
+        }
+    }
     foreach ($effect in $semantics.GetEnumerator()) {
         $semanticAbility = if ($effect.Value.Contains('ability')) {
             [string]$effect.Value.ability
@@ -191,7 +214,9 @@ function Test-NameResources {
             ([string]::IsNullOrWhiteSpace($semanticAbility) -eq $false -and
              -not $abilityTips.Contains($semanticAbility)) -or
             ($hasShowParent -and
-             $effect.Value.show_parent_ability -isnot [bool])) {
+             $effect.Value.show_parent_ability -isnot [bool]) -or
+            ($effect.Value.Contains('damage_name_zh') -and
+             $effect.Value.damage_name_zh -isnot [string])) {
             throw "Invalid gameplay effect semantic reference: $($effect.Key)"
         }
     }

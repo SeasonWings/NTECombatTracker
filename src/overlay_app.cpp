@@ -186,6 +186,64 @@ bool HasRecordedDisplayName(
     return !display_name.empty() && origin != "technical" && origin != "unknown";
 }
 
+void EnrichHistoricalNames(
+    nte::combat_stats::overlay::EncounterDetail& detail,
+    const nte::combat_stats::ResourceNameResolver& resolver) {
+    for (auto& player : detail.players) {
+        const auto character = resolver.ResolveParticipant(player.object_path);
+        if (!HasRecordedDisplayName(player.display_name, player.name_origin) &&
+            character.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
+            player.display_name = character.display_name;
+            player.label = character.display_name;
+            player.name_origin = std::string(
+                nte::combat_stats::DisplayNameOriginName(character.origin));
+            player.name_resource_version = character.resource_version;
+        }
+        const auto source = resolver.ResolveDamageSource(player.maximum_source_name);
+        if (!HasRecordedDisplayName(player.maximum_source_display_name,
+                player.maximum_source_name_origin) &&
+            source.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
+            player.maximum_source_display_name = source.display_name;
+            player.maximum_source_name_origin = std::string(
+                nte::combat_stats::DisplayNameOriginName(source.origin));
+            player.maximum_source_resource_version = source.resource_version;
+        }
+    }
+    for (auto& event : detail.events) {
+        const auto enrich = [&resolver](
+            const std::string& technical_name,
+            std::string& display_name,
+            std::string& origin,
+            std::string& resource_version,
+            const bool participant) {
+            if (HasRecordedDisplayName(display_name, origin)) return;
+            if (participant) {
+                const auto resolved = resolver.ResolveParticipant(technical_name);
+                if (resolved.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
+                    display_name = resolved.display_name;
+                    origin = std::string(
+                        nte::combat_stats::DisplayNameOriginName(resolved.origin));
+                    resource_version = resolved.resource_version;
+                }
+            } else {
+                const auto resolved = resolver.ResolveDamageSource(technical_name);
+                if (resolved.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
+                    display_name = resolved.display_name;
+                    origin = std::string(
+                        nte::combat_stats::DisplayNameOriginName(resolved.origin));
+                    resource_version = resolved.resource_version;
+                }
+            }
+        };
+        enrich(event.source, event.source_display_name, event.source_name_origin,
+            event.source_resource_version, false);
+        enrich(event.attacker_name, event.attacker_display_name,
+            event.attacker_name_origin, event.attacker_resource_version, true);
+        enrich(event.victim_name, event.victim_display_name,
+            event.victim_name_origin, event.victim_resource_version, true);
+    }
+}
+
 std::wstring Utf16(const std::string& text) {
     if (text.empty()) return {};
     const int size = MultiByteToWideChar(
@@ -472,46 +530,6 @@ void RenderOverlay() {
         history_error = g_app.history_error;
         connected = g_app.connected;
         name_resolver = g_app.name_resolver;
-    }
-    if (history_detail) {
-        for (auto& player : history_detail->players) {
-            const auto character = name_resolver.ResolveParticipant(player.object_path);
-            if (!HasRecordedDisplayName(player.display_name, player.name_origin) &&
-                character.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
-                player.display_name = character.display_name;
-                player.label = character.display_name;
-                player.name_origin = std::string(
-                    nte::combat_stats::DisplayNameOriginName(character.origin));
-                player.name_resource_version = character.resource_version;
-            }
-            const auto source = name_resolver.ResolveDamageSource(
-                player.maximum_source_name);
-            if (!HasRecordedDisplayName(player.maximum_source_display_name,
-                    player.maximum_source_name_origin) &&
-                source.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
-                player.maximum_source_display_name = source.display_name;
-            }
-        }
-        for (auto& event : history_detail->events) {
-            const auto source = name_resolver.ResolveDamageSource(event.source);
-            const auto attacker = name_resolver.ResolveParticipant(event.attacker_name);
-            const auto victim = name_resolver.ResolveParticipant(event.victim_name);
-            if (!HasRecordedDisplayName(event.source_display_name,
-                    event.source_name_origin) &&
-                source.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
-                event.source_display_name = source.display_name;
-            }
-            if (!HasRecordedDisplayName(event.attacker_display_name,
-                    event.attacker_name_origin) &&
-                attacker.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
-                event.attacker_display_name = attacker.display_name;
-            }
-            if (!HasRecordedDisplayName(event.victim_display_name,
-                    event.victim_name_origin) &&
-                victim.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
-                event.victim_display_name = victim.display_name;
-            }
-        }
     }
     const float dpi = static_cast<float>(GetDpiForWindow(g_app.window)) / 96.0F;
     const float scale = dpi * g_app.settings.ui_scale;
@@ -1188,6 +1206,7 @@ void LoadHistoryData(const std::stop_token stop) {
         std::optional<nte::combat_stats::overlay::EncounterDetail> detail;
         if (load_detail) {
             detail = reader.Encounter(requested_report, requested_encounter, detail_error);
+            if (detail) EnrichHistoricalNames(*detail, g_app.name_resolver);
         }
         bool definitive_detail_failure{};
         {

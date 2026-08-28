@@ -481,6 +481,7 @@ void AggregatesAndQualityFlags() {
     first.source_id = 101;
     first.source_name = "SkillA";
     first.victim_name = "EnemyA";
+    first.victim_display_name = "敌人甲";
     first.victim = {70, 1};
     engine.AcceptDamage(first, start);
 
@@ -506,6 +507,10 @@ void AggregatesAndQualityFlags() {
         Check(snapshot.outgoing_sources[0].maximum_hit == 100, "source maximum should aggregate");
     }
     Check(snapshot.outgoing_targets.size() == 1, "same target should aggregate");
+    if (!snapshot.outgoing_targets.empty()) {
+        Check(snapshot.outgoing_targets[0].label == "敌人甲",
+            "outgoing targets should use the resolved participant display name");
+    }
     Check(snapshot.incoming_sources.size() == 1, "incoming attacker/source should aggregate");
     Check(snapshot.quality.partial && snapshot.quality.cursor_gap,
           "partial cursor gap flags should propagate");
