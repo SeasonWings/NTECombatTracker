@@ -18,10 +18,12 @@ struct CharacterEntry {
     std::string display_name;
 };
 
+enum class ParentAbilityPolicy { SkillDamage, Semantic, Hidden };
+
 struct EffectEntry {
     std::string ability;
     std::string component_name;
-    std::optional<bool> show_parent_ability;
+    ParentAbilityPolicy parent_policy{ParentAbilityPolicy::SkillDamage};
 };
 
 struct DamageSkillEntry {
@@ -160,7 +162,8 @@ ResourceNameResolver ResourceNameResolver::Load(
         }
         for (const auto& [effect, value] : damage.front().at("Rows").items()) {
             if (const auto ability = value.find("GAName"); ability != value.end() &&
-                ability->is_string() && !ability->get_ref<const std::string&>().empty()) {
+                ability->is_string() && !ability->get_ref<const std::string&>().empty() &&
+                ability->get_ref<const std::string&>() != "None") {
                 entries->damage_skills.emplace(Lower(effect), DamageSkillEntry{
                     effect, ability->get<std::string>()});
             }
@@ -176,7 +179,9 @@ ResourceNameResolver ResourceNameResolver::Load(
             entry.ability = value.value("ability", std::string{});
             entry.component_name = value.value("damage_name_zh", std::string{});
             if (const auto show = value.find("show_parent_ability"); show != value.end()) {
-                entry.show_parent_ability = show->get<bool>();
+                entry.parent_policy = show->get<bool>()
+                    ? ParentAbilityPolicy::Semantic
+                    : ParentAbilityPolicy::Hidden;
             }
             entries->effect_semantics.emplace(Lower(effect), std::move(entry));
         }
@@ -276,9 +281,9 @@ ResolvedDamageName ResourceNameResolver::ResolveDamageSource(
     if (const auto found = entries_->effect_semantics.find(effect_key);
         found != entries_->effect_semantics.end()) {
         component = found->second.component_name;
-        show_parent = found->second.show_parent_ability.value_or(true);
-        if ((result.ability_name.empty() ||
-             found->second.show_parent_ability == true) &&
+        show_parent = found->second.parent_policy != ParentAbilityPolicy::Hidden;
+        if ((found->second.parent_policy == ParentAbilityPolicy::Semantic ||
+             result.ability_name.empty()) &&
             !found->second.ability.empty()) {
             result.ability_name = found->second.ability;
         }
