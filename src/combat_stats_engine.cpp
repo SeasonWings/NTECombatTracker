@@ -164,6 +164,13 @@ CombatStatsEngine::PlayerAggregate& CombatStatsEngine::ConfirmControlledActor(
                     add_count(destination.critical_hits, source.critical_hits);
                     add_count(destination.head_hits, source.head_hits);
                     add_count(destination.weak_hits, source.weak_hits);
+                    quality_.overflow = SaturatingAdd(
+                        destination.incoming_damage, source.incoming_damage) ||
+                        quality_.overflow;
+                    add_count(destination.incoming_positive_hits,
+                        source.incoming_positive_hits);
+                    destination.maximum_incoming_hit = (std::max)(
+                        destination.maximum_incoming_hit, source.maximum_incoming_hit);
                     if (source.maximum_hit > destination.maximum_hit) {
                         destination.maximum_hit = source.maximum_hit;
                         destination.maximum_source_id = source.maximum_source_id;
@@ -212,8 +219,9 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
     if (outgoing) {
         outgoing_player = &ConfirmControlledActor(event.attacker, event.attacker_name);
     }
+    PlayerAggregate* incoming_player{};
     if (incoming) {
-        static_cast<void>(ConfirmControlledActor(event.victim, event.victim_name));
+        incoming_player = &ConfirmControlledActor(event.victim, event.victim_name);
     }
     if (relevant) last_activity_ = now;
     if (event.final_damage > 0) {
@@ -273,6 +281,15 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
                 event.attacker_name + " / " + event.source_name,
                 event.final_damage, other_incoming_source_, quality_.aggregate_truncated,
                 quality_.overflow);
+            if (incoming_player != nullptr) {
+                quality_.overflow = SaturatingAdd(
+                    incoming_player->incoming_damage, event.final_damage) ||
+                    quality_.overflow;
+                quality_.overflow = SaturatingIncrement(
+                    incoming_player->incoming_positive_hits) || quality_.overflow;
+                incoming_player->maximum_incoming_hit = (std::max)(
+                    incoming_player->maximum_incoming_hit, event.final_damage);
+            }
         }
     } else if (outgoing || incoming) {
         quality_.overflow = SaturatingIncrement(non_positive_events_) || quality_.overflow;
@@ -286,6 +303,9 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
         ? EventDirection::Both
         : (outgoing ? EventDirection::Outgoing
                     : (incoming ? EventDirection::Incoming : EventDirection::Visible));
+    recent.source_id = event.source_id;
+    recent.attacker_handle = event.attacker;
+    recent.victim_handle = event.victim;
     recent.final_damage = event.final_damage;
     recent.display_damage = event.display_damage;
     recent.basic_damage = event.basic_damage;
@@ -443,8 +463,15 @@ Snapshot CombatStatsEngine::BuildSnapshot(const TimePoint now) const {
         if (player_rolling_damage > 0) {
             const double rolling_seconds = (std::max)(1.0, (std::min)(10.0,
                 std::chrono::duration<double>(now - player_rolling_start).count()));
-            row.rolling_dps = static_cast<double>(player_rolling_damage) / rolling_seconds;
+        row.rolling_dps = static_cast<double>(player_rolling_damage) / rolling_seconds;
         }
+        row.incoming_damage = aggregate.incoming_damage;
+        row.incoming_positive_hits = aggregate.incoming_positive_hits;
+        row.maximum_incoming_hit = aggregate.maximum_incoming_hit;
+        row.incoming_share = incoming_damage_ > 0
+            ? static_cast<double>(aggregate.incoming_damage) * 100.0 /
+                static_cast<double>(incoming_damage_)
+            : 0.0;
         snapshot.players.push_back(std::move(row));
     }
     std::ranges::sort(snapshot.players, [](const PlayerRow& left, const PlayerRow& right) {

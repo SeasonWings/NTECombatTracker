@@ -20,7 +20,7 @@ struct ReportOpen {
     combat_stats::Handle world;
     std::int64_t started_utc_ms{};
     std::string game_build;
-    std::string plugin_version{"0.3.0"};
+    std::string plugin_version{"0.4.0"};
     std::string runtime_version;
 };
 

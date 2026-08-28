@@ -43,7 +43,19 @@ struct WindowExtent {
     int height{};
 };
 
-enum class HitRegion : std::uint8_t { Client, Title, ColumnHeader, ResizeGrip };
+enum class HitRegion : std::uint8_t {
+    Client,
+    Title,
+    ColumnHeader,
+    ResizeLeft,
+    ResizeRight,
+    ResizeTop,
+    ResizeBottom,
+    ResizeTopLeft,
+    ResizeTopRight,
+    ResizeBottomLeft,
+    ResizeGrip,
+};
 
 [[nodiscard]] std::vector<PlayerRow> SortPlayers(
     const std::vector<PlayerRow>& players,

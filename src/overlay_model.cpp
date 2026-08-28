@@ -103,10 +103,18 @@ HitRegion HitTest(
     const float y,
     const bool locked) noexcept {
     if (locked) return HitRegion::Client;
-    if (x >= layout.width - layout.resize_grip &&
-        y >= layout.height - layout.resize_grip) {
-        return HitRegion::ResizeGrip;
-    }
+    const bool left = x >= 0.0F && x < layout.resize_grip;
+    const bool right = x >= layout.width - layout.resize_grip && x <= layout.width;
+    const bool top = y >= 0.0F && y < layout.resize_grip;
+    const bool bottom = y >= layout.height - layout.resize_grip && y <= layout.height;
+    if (left && top) return HitRegion::ResizeTopLeft;
+    if (right && top) return HitRegion::ResizeTopRight;
+    if (left && bottom) return HitRegion::ResizeBottomLeft;
+    if (right && bottom) return HitRegion::ResizeGrip;
+    if (left) return HitRegion::ResizeLeft;
+    if (right) return HitRegion::ResizeRight;
+    if (top) return HitRegion::ResizeTop;
+    if (bottom) return HitRegion::ResizeBottom;
     if (y >= 0.0F && y < layout.title_height) return HitRegion::Title;
     if (y >= layout.title_height &&
         y < layout.title_height + layout.header_height) {

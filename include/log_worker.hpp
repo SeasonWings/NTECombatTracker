@@ -2,6 +2,7 @@
 
 #include "damage_log.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -34,6 +35,7 @@ public:
     bool Submit(const LoggedDamage& command);
     bool Submit(const EncounterClose& command);
     bool Submit(const ReportClose& command);
+    bool FlushAndWait(std::chrono::milliseconds timeout, std::string& error);
     bool DeleteReport(std::string report_id);
     [[nodiscard]] LogWorkerStatus Status() const;
 

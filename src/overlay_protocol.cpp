@@ -38,6 +38,24 @@ const char* StateName(const EncounterState state) noexcept {
     return "idle";
 }
 
+const char* DirectionName(const EventDirection direction) noexcept {
+    switch (direction) {
+    case EventDirection::Visible: return "visible";
+    case EventDirection::Outgoing: return "outgoing";
+    case EventDirection::Incoming: return "incoming";
+    case EventDirection::Both: return "both";
+    }
+    return "visible";
+}
+
+EventDirection ParseDirection(const std::string& direction) {
+    if (direction == "visible") return EventDirection::Visible;
+    if (direction == "outgoing") return EventDirection::Outgoing;
+    if (direction == "incoming") return EventDirection::Incoming;
+    if (direction == "both") return EventDirection::Both;
+    throw std::runtime_error("recent_events.direction is invalid");
+}
+
 EncounterState ParseState(const std::string& state) {
     if (state == "idle") return EncounterState::Idle;
     if (state == "active") return EncounterState::Active;
@@ -73,7 +91,12 @@ Json PlayerToJson(const PlayerRow& row) {
         {"damage_share", row.damage_share},
         {"encounter_dps", row.encounter_dps},
         {"active_dps", row.active_dps},
-        {"rolling_dps_10s", row.rolling_dps}};
+        {"rolling_dps_10s", row.rolling_dps},
+        {"incoming_metrics", {
+            {"damage", Decimal(row.incoming_damage)},
+            {"positive_hits", Decimal(row.incoming_positive_hits)},
+            {"maximum_hit", Decimal(row.maximum_incoming_hit)},
+            {"share", row.incoming_share}}}};
 }
 
 PlayerRow PlayerFromJson(const Json& value) {
@@ -110,7 +133,70 @@ PlayerRow PlayerFromJson(const Json& value) {
     row.encounter_dps = value.at("encounter_dps").get<double>();
     row.active_dps = value.at("active_dps").get<double>();
     row.rolling_dps = value.at("rolling_dps_10s").get<double>();
+    if (const auto incoming = value.find("incoming_metrics"); incoming != value.end()) {
+        row.incoming_damage = ParseDecimal<std::int64_t>(
+            incoming->at("damage"), "players.incoming_metrics.damage");
+        row.incoming_positive_hits = ParseDecimal<std::uint64_t>(
+            incoming->at("positive_hits"), "players.incoming_metrics.positive_hits");
+        row.maximum_incoming_hit = ParseDecimal<std::int64_t>(
+            incoming->at("maximum_hit"), "players.incoming_metrics.maximum_hit");
+        row.incoming_share = incoming->at("share").get<double>();
+    }
     return row;
+}
+
+Json RecentEventToJson(const RecentEvent& event) {
+    return Json{
+        {"sequence", Decimal(event.sequence)},
+        {"tick_sequence", Decimal(event.tick_sequence)},
+        {"flags", event.flags},
+        {"direction", DirectionName(event.direction)},
+        {"source_id", Decimal(event.source_id)},
+        {"attacker_handle", {{"id", Decimal(event.attacker_handle.id)},
+                             {"generation", Decimal(event.attacker_handle.generation)}}},
+        {"victim_handle", {{"id", Decimal(event.victim_handle.id)},
+                           {"generation", Decimal(event.victim_handle.generation)}}},
+        {"final_damage", Decimal(event.final_damage)},
+        {"display_damage", Decimal(event.display_damage)},
+        {"basic_damage", Decimal(event.basic_damage)},
+        {"received_utc_ms", Decimal(event.received_utc_ms)},
+        {"received_offset_us", Decimal(event.received_offset_us)},
+        {"source", event.source}, {"attacker", event.attacker}, {"victim", event.victim}};
+}
+
+RecentEvent RecentEventFromJson(const Json& value) {
+    RecentEvent event;
+    event.sequence = ParseDecimal<std::uint64_t>(value.at("sequence"),
+        "recent_events.sequence");
+    event.tick_sequence = ParseDecimal<std::uint64_t>(value.at("tick_sequence"),
+        "recent_events.tick_sequence");
+    event.flags = value.at("flags").get<std::uint32_t>();
+    event.direction = ParseDirection(value.at("direction").get<std::string>());
+    event.source_id = ParseDecimal<std::uint64_t>(value.at("source_id"),
+        "recent_events.source_id");
+    const auto parse_handle = [](const Json& handle, const char* prefix) {
+        return Handle{
+            ParseDecimal<std::uint64_t>(handle.at("id"), prefix),
+            ParseDecimal<std::uint64_t>(handle.at("generation"), prefix)};
+    };
+    event.attacker_handle = parse_handle(value.at("attacker_handle"),
+        "recent_events.attacker_handle");
+    event.victim_handle = parse_handle(value.at("victim_handle"),
+        "recent_events.victim_handle");
+    event.final_damage = ParseDecimal<std::int64_t>(value.at("final_damage"),
+        "recent_events.final_damage");
+    event.display_damage = ParseDecimal<std::int64_t>(value.at("display_damage"),
+        "recent_events.display_damage");
+    event.basic_damage = ParseDecimal<std::int64_t>(value.at("basic_damage"),
+        "recent_events.basic_damage");
+    event.received_utc_ms = ParseDecimal<std::int64_t>(value.at("received_utc_ms"),
+        "recent_events.received_utc_ms");
+    event.received_offset_us = ParseDecimal<std::uint64_t>(value.at("received_offset_us"),
+        "recent_events.received_offset_us");
+    event.source = value.at("source").get<std::string>();
+    event.attacker = value.at("attacker").get<std::string>();
+    event.victim = value.at("victim").get<std::string>();
+    return event;
 }
 
 }  // namespace
@@ -123,6 +209,7 @@ NteOverlaySnapshot::NteOverlaySnapshot(Data data)
       producer_stopping(data.producer_stopping),
       capture_available(data.capture_available),
       capture_status(std::move(data.capture_status)),
+      control_status(std::move(data.control_status)),
       report_id(std::move(data.report_id)),
       encounter_id(std::move(data.encounter_id)),
       primary_target(std::move(data.primary_target)),
@@ -135,7 +222,14 @@ NteOverlaySnapshot::NteOverlaySnapshot(Data data)
 std::string SerializeOverlaySnapshot(const NteOverlaySnapshot& snapshot) {
     Json players = Json::array();
     for (const PlayerRow& row : snapshot.combat.players) players.push_back(PlayerToJson(row));
-    const Json document{
+    Json recent_events = Json::array();
+    constexpr std::size_t kMaximumRecentEvents = 128;
+    const std::size_t first = snapshot.combat.recent_events.size() > kMaximumRecentEvents
+        ? snapshot.combat.recent_events.size() - kMaximumRecentEvents : 0;
+    for (std::size_t index = first; index < snapshot.combat.recent_events.size(); ++index) {
+        recent_events.push_back(RecentEventToJson(snapshot.combat.recent_events[index]));
+    }
+    Json document{
         {"channel", kOverlayChannel},
         {"schema_version", kOverlaySchemaVersion},
         {"metric_version", kMetricVersion},
@@ -148,6 +242,7 @@ std::string SerializeOverlaySnapshot(const NteOverlaySnapshot& snapshot) {
         {"capture_scope", "host_visible_during_player_encounter"},
         {"capture", {{"available", snapshot.capture_available},
                      {"status", snapshot.capture_status}}},
+        {"control_status", snapshot.control_status},
         {"report_id", snapshot.report_id},
         {"encounter_id", snapshot.encounter_id},
         {"encounter", {{"state", StateName(snapshot.combat.state)},
@@ -165,6 +260,7 @@ std::string SerializeOverlaySnapshot(const NteOverlaySnapshot& snapshot) {
                      {"shield", snapshot.combat.shield},
                      {"primary_target", snapshot.primary_target}}},
         {"players", std::move(players)},
+        {"recent_events", std::move(recent_events)},
         {"quality", {{"partial", snapshot.combat.quality.partial},
                      {"overflow", snapshot.combat.quality.overflow},
                      {"cursor_gap", snapshot.combat.quality.cursor_gap},
@@ -173,7 +269,13 @@ std::string SerializeOverlaySnapshot(const NteOverlaySnapshot& snapshot) {
                        {"connected_clients", snapshot.connected_clients},
                        {"published_messages", Decimal(snapshot.published_messages)},
                        {"dropped_messages", Decimal(snapshot.transport_dropped_messages)}}}};
-    return document.dump();
+    std::string result = document.dump();
+    while (result.size() > kMaximumOverlayMessageBytes &&
+           !document["recent_events"].empty()) {
+        document["recent_events"].erase(document["recent_events"].begin());
+        result = document.dump();
+    }
+    return result;
 }
 
 std::optional<NteOverlaySnapshot> ParseOverlaySnapshot(
@@ -219,6 +321,9 @@ std::optional<NteOverlaySnapshot> ParseOverlaySnapshot(
         const Json& capture = document.at("capture");
         result.capture_available = capture.at("available").get<bool>();
         result.capture_status = capture.at("status").get<std::string>();
+        if (const auto status = document.find("control_status"); status != document.end()) {
+            result.control_status = status->get<std::string>();
+        }
         result.report_id = document.at("report_id").get<std::string>();
         result.encounter_id = document.at("encounter_id").get<std::string>();
         const Json& encounter = document.at("encounter");
@@ -242,6 +347,11 @@ std::optional<NteOverlaySnapshot> ParseOverlaySnapshot(
         result.primary_target = summary.at("primary_target").get<std::string>();
         for (const Json& player : document.at("players")) {
             result.combat.players.push_back(PlayerFromJson(player));
+        }
+        if (const auto events = document.find("recent_events"); events != document.end()) {
+            for (const Json& event : *events) {
+                result.combat.recent_events.push_back(RecentEventFromJson(event));
+            }
         }
         const Json& quality = document.at("quality");
         result.combat.quality.partial = quality.at("partial").get<bool>();

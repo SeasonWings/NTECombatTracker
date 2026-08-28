@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(NteCombatStatsPlugin VERSION 0.3.0 LANGUAGES CXX)
+project(NteCombatStatsPlugin VERSION 0.4.0 LANGUAGES CXX)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "NTE Combat Stats targets Windows x64")
@@ -41,7 +41,10 @@ if(MSVC)
     target_compile_options(nte_overlay_protocol PRIVATE /W4 /permissive- /EHsc /utf-8)
 endif()
 
-add_library(nte_overlay_model STATIC src/overlay_model.cpp src/overlay_publish_policy.cpp)
+add_library(nte_overlay_model STATIC
+    src/overlay_model.cpp
+    src/overlay_publish_policy.cpp
+    src/history_reader.cpp)
 target_include_directories(nte_overlay_model PUBLIC include)
 target_link_libraries(nte_overlay_model PUBLIC nte_overlay_protocol)
 if(MSVC)
@@ -97,6 +100,13 @@ if(BUILD_TESTING)
         target_compile_options(nte_overlay_publish_policy_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
     endif()
     add_test(NAME nte_overlay_publish_policy COMMAND nte_overlay_publish_policy_tests)
+
+    add_executable(nte_history_reader_tests tests/history_reader_tests.cpp)
+    target_link_libraries(nte_history_reader_tests PRIVATE nte_overlay_model)
+    if(MSVC)
+        target_compile_options(nte_history_reader_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME nte_history_reader COMMAND nte_history_reader_tests)
 endif()
 
 option(NTE_COMBAT_STATS_BUILD_PLUGIN "Build the Anomaly plugin package" ON)

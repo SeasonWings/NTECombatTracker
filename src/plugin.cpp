@@ -3,6 +3,7 @@
 #include "log_worker.hpp"
 #include "overlay_publish_policy.hpp"
 #include "overlay_protocol.hpp"
+#include "overlay_control.hpp"
 
 #include <anomaly/sdk/anomaly_sdk.h>
 #include <anomaly/sdk/cpp.hpp>
@@ -108,6 +109,9 @@ struct Context {
     bool restart_overlay_requested{};
     AnomalyWebSocketServerInfoV1 overlay_server_info{sizeof(AnomalyWebSocketServerInfoV1)};
     std::string overlay_error;
+    std::string control_status;
+    HANDLE manual_end_event{};
+    HANDLE plugin_stopping_event{};
 } g_context;
 
 NteOverlaySnapshot MakeOverlaySnapshot(
@@ -332,6 +336,7 @@ bool OpenEncounterLog(
     const TimePoint now,
     const std::int64_t utc_ms) {
     if (!g_context.log_worker) return false;
+    g_context.control_status.clear();
     auto& session = g_context.log_session;
     if (session.report_id.empty()) {
         session.report_id = nte::damage_log::GenerateUuidV4();
@@ -341,7 +346,7 @@ bool OpenEncounterLog(
         session.report_started_utc_ms = utc_ms;
         if (!g_context.log_worker->Submit(nte::damage_log::ReportOpen{
                 session.report_id, world, utc_ms, ResolveBuildId(host),
-                "0.3.0", ResolveRuntimeVersion(host)})) return false;
+                "0.4.0", ResolveRuntimeVersion(host)})) return false;
     }
     session.encounter_id = nte::damage_log::GenerateUuidV4();
     if (session.encounter_id.empty()) return false;
@@ -365,14 +370,30 @@ bool OpenEncounterLog(
         session.encounter_id, utc_ms, session.encounter_started_offset_us});
 }
 
-void FinishEncounterLog(
+void ResetEncounterSession() {
+    auto& session = g_context.log_session;
+    session.encounter_id.clear();
+    session.encounter_started_utc_ms = 0;
+    session.encounter_started_offset_us = 0;
+    session.dropped_events = 0;
+    session.dropped_first_sequence = 0;
+    session.dropped_last_sequence = 0;
+    session.service_unavailable_started_us.reset();
+    session.service_unavailable_intervals.clear();
+    session.missing_sequence_ranges.clear();
+    session.open_missing_sequence_start.reset();
+    session.missing_ranges_truncated = false;
+    session.service_gap_truncated = false;
+}
+
+bool FinishEncounterLog(
     const char* reason,
     const NteOverlaySnapshot& overlay_snapshot,
     const TimePoint now,
     const std::int64_t utc_ms) {
     const Snapshot& snapshot = overlay_snapshot.combat;
     auto& session = g_context.log_session;
-    if (!g_context.log_worker || session.encounter_id.empty()) return;
+    if (!g_context.log_worker || session.encounter_id.empty()) return false;
     auto quality = snapshot.quality;
     const std::uint64_t closed_offset_us = ReportOffsetMicroseconds(now);
     if (session.service_unavailable_started_us) {
@@ -387,7 +408,7 @@ void FinishEncounterLog(
     if (session.dropped_events != 0 || !session.service_unavailable_intervals.empty() ||
         session.service_gap_truncated || session.open_missing_sequence_start ||
         session.missing_ranges_truncated) quality.partial = true;
-    static_cast<void>(g_context.log_worker->Submit(nte::damage_log::EncounterClose{
+    if (!g_context.log_worker->Submit(nte::damage_log::EncounterClose{
         session.encounter_id, reason, utc_ms, closed_offset_us,
         snapshot.outgoing_damage, snapshot.incoming_damage,
         snapshot.encounter_dps, snapshot.duration_seconds, quality,
@@ -395,19 +416,13 @@ void FinishEncounterLog(
         session.dropped_last_sequence, {}, session.service_unavailable_intervals,
         session.missing_sequence_ranges, session.open_missing_sequence_start,
         session.service_gap_truncated, session.missing_ranges_truncated,
-        snapshot.players}));
-    session.encounter_id.clear();
-    session.encounter_started_utc_ms = 0;
-    session.encounter_started_offset_us = 0;
-    session.dropped_events = 0;
-    session.dropped_first_sequence = 0;
-    session.dropped_last_sequence = 0;
-    session.service_unavailable_started_us.reset();
-    session.service_unavailable_intervals.clear();
-    session.missing_sequence_ranges.clear();
-    session.open_missing_sequence_start.reset();
-    session.missing_ranges_truncated = false;
-    session.service_gap_truncated = false;
+        snapshot.players})) return false;
+    std::string flush_error;
+    if (!g_context.log_worker->FlushAndWait(std::chrono::seconds(5), flush_error)) {
+        return false;
+    }
+    ResetEncounterSession();
+    return true;
 }
 
 void UpdateServiceGap(const bool available, const TimePoint now) {
@@ -480,6 +495,7 @@ NteOverlaySnapshot MakeOverlaySnapshot(
     data.producer_stopping = stopping;
     data.capture_available = service_status == ANOMALY_STATUS_V1_OK;
     data.capture_status = CaptureStatusName(service_status);
+    data.control_status = g_context.control_status;
     data.report_id = report_id;
     data.encounter_id = encounter_id;
     if (!stats.outgoing_targets.empty()) {
@@ -550,7 +566,8 @@ bool LaunchOverlay(
         return false;
     }
     std::wstring command = L"\"" + executable.wstring() + L"\" --port " +
-        std::to_wstring(port);
+        std::to_wstring(port) + L" --host-pid " +
+        std::to_wstring(GetCurrentProcessId());
     if (restart) command += L" --restart";
     std::vector<wchar_t> mutable_command(command.begin(), command.end());
     mutable_command.push_back(L'\0');
@@ -659,12 +676,24 @@ void ResetState() {
     g_context.restart_overlay_requested = false;
     g_context.overlay_server_info = {sizeof(AnomalyWebSocketServerInfoV1)};
     g_context.overlay_error.clear();
+    g_context.control_status.clear();
     std::scoped_lock lock(g_context.mutex);
     g_context.render = {};
     g_context.reset_requested = false;
     g_context.delete_request.clear();
     g_context.pending_delete.clear();
     g_context.expanded_reports.clear();
+}
+
+void CloseControlHandles() {
+    if (g_context.manual_end_event != nullptr) {
+        CloseHandle(g_context.manual_end_event);
+        g_context.manual_end_event = nullptr;
+    }
+    if (g_context.plugin_stopping_event != nullptr) {
+        CloseHandle(g_context.plugin_stopping_event);
+        g_context.plugin_stopping_event = nullptr;
+    }
 }
 
 void Update(void* context, double) {
@@ -699,6 +728,8 @@ void Update(void* context, double) {
     }
 
     bool reset_requested{};
+    const bool manual_end_requested = g_context.manual_end_event != nullptr &&
+        WaitForSingleObject(g_context.manual_end_event, 0) == WAIT_OBJECT_0;
     bool restart_overlay_requested{};
     std::string delete_request;
     {
@@ -718,9 +749,12 @@ void Update(void* context, double) {
     if (!delete_request.empty() && g_context.log_worker) {
         static_cast<void>(g_context.log_worker->DeleteReport(std::move(delete_request)));
     }
-    if (reset_requested) {
+    if (reset_requested || manual_end_requested) {
+        bool may_reset = true;
         if (!g_context.log_session.encounter_id.empty()) {
-            FinishEncounterLog("manual_reset", MakeOverlaySnapshot(
+            may_reset = FinishEncounterLog(
+                manual_end_requested ? "manual_end" : "manual_reset",
+                MakeOverlaySnapshot(
                 g_context.engine.BuildSnapshot(now),
                 CaptureStatusCode(g_context.render.snapshot.get()),
                 g_context.render.snapshot ?
@@ -729,11 +763,17 @@ void Update(void* context, double) {
                 g_context.log_session.encounter_id, utc_ms, false,
                 g_context.overlay_snapshot_sequence), now, utc_ms);
         }
-        g_context.engine.Reset();
-        g_context.cursor.RequestReset();
-        g_context.pending_cursor_gap_first.reset();
-        g_context.pending_missing_sequence_ranges.clear();
-        g_context.pending_missing_ranges_truncated = false;
+        if (manual_end_requested) {
+            g_context.control_status = may_reset
+                ? "manual_end_completed" : "manual_end_failed";
+        }
+        if (may_reset) {
+            g_context.engine.Reset();
+            g_context.cursor.RequestReset();
+            g_context.pending_cursor_gap_first.reset();
+            g_context.pending_missing_sequence_ranges.clear();
+            g_context.pending_missing_ranges_truncated = false;
+        }
     }
 
     std::uint32_t service_status = ANOMALY_STATUS_V1_UNAVAILABLE;
@@ -1249,6 +1289,13 @@ AnomalyStatusV1 ANOMALY_CALL Start(void* context) {
         g_context.log_worker.reset();
     }
     ResetState();
+    CloseControlHandles();
+    g_context.manual_end_event = CreateEventW(nullptr, FALSE, FALSE,
+        nte::combat_stats::overlay::kManualEndEventName);
+    g_context.plugin_stopping_event = CreateEventW(nullptr, FALSE, FALSE,
+        nte::combat_stats::overlay::kPluginStoppingEventName);
+    if (g_context.manual_end_event != nullptr) ResetEvent(g_context.manual_end_event);
+    if (g_context.plugin_stopping_event != nullptr) ResetEvent(g_context.plugin_stopping_event);
     g_context.producer_instance_id = nte::damage_log::GenerateUuidV4();
     g_context.log_root = nte::damage_log::DefaultLogRoot();
     if (!g_context.log_root.empty()) {
@@ -1260,6 +1307,9 @@ AnomalyStatusV1 ANOMALY_CALL Start(void* context) {
 }
 
 AnomalyStatusV1 ANOMALY_CALL Stop(void*, std::uint32_t) {
+    if (g_context.plugin_stopping_event != nullptr) {
+        SetEvent(g_context.plugin_stopping_event);
+    }
     const auto now = nte::combat_stats::Clock::now();
     const auto utc_ms = UtcNowMilliseconds();
     RenderState render;
@@ -1288,15 +1338,20 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void*, std::uint32_t) {
         g_context.log_worker.reset();
     }
     ResetState();
+    CloseControlHandles();
     return anomaly::sdk::Ok();
 }
 
 void ANOMALY_CALL Unload(void*) {
+    if (g_context.plugin_stopping_event != nullptr) {
+        SetEvent(g_context.plugin_stopping_event);
+    }
     if (g_context.log_worker) {
         g_context.log_worker->Stop();
         g_context.log_worker.reset();
     }
     ResetState();
+    CloseControlHandles();
     g_context.host = nullptr;
     g_context.ui = nullptr;
     g_context.core = nullptr;
@@ -1315,7 +1370,7 @@ ANOMALY_SDK_EXPORT AnomalyStatusV1 ANOMALY_CALL AnomalyPluginEntryV1(
         anomaly::sdk::StringView("local.nte.combat-stats"),
         anomaly::sdk::StringView("NTE Combat Stats"),
         anomaly::sdk::StringView("Shikari"),
-        anomaly::sdk::StringView("0.3.0"),
+        anomaly::sdk::StringView("0.4.0"),
         Load, Start, Stop, Unload, Update, Draw};
     return anomaly::sdk::Ok();
 }

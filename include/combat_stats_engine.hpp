@@ -81,6 +81,10 @@ struct PlayerRow {
     double encounter_dps{};
     double active_dps{};
     double rolling_dps{};
+    std::int64_t incoming_damage{};
+    std::uint64_t incoming_positive_hits{};
+    std::int64_t maximum_incoming_hit{};
+    double incoming_share{};
 };
 
 [[nodiscard]] inline double PlayerRate(
@@ -108,6 +112,9 @@ struct RecentEvent {
     std::uint64_t tick_sequence{};
     std::uint32_t flags{};
     EventDirection direction{EventDirection::Outgoing};
+    std::uint64_t source_id{};
+    Handle attacker_handle;
+    Handle victim_handle;
     std::int64_t final_damage{};
     std::int64_t display_damage{};
     std::int64_t basic_damage{};
@@ -196,6 +203,9 @@ private:
         TimePoint first_positive_damage{};
         TimePoint last_positive_damage{};
         std::vector<TimedDamage> rolling_damage;
+        std::int64_t incoming_damage{};
+        std::uint64_t incoming_positive_hits{};
+        std::int64_t maximum_incoming_hit{};
     };
 
     PlayerAggregate& ConfirmControlledActor(Handle handle, const std::string& object_path);

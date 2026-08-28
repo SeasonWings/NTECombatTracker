@@ -222,6 +222,12 @@ void WorkerDrainsCommandsBeforeStopping() {
     Check(worker.Submit(EncounterClose{
               encounter_id, "inactivity", 2100, 1100, 5, 0, 5.0, 1.0, {}}),
           "encounter close should enqueue");
+    std::string flush_error;
+    Check(worker.FlushAndWait(std::chrono::seconds(2), flush_error),
+          "encounter close should be durably flushed");
+    Check(std::filesystem::exists(
+              root / "reports" / report_id / "encounters.jsonl"),
+          "flush barrier should persist the encounter summary before returning");
     Check(worker.Submit(ReportClose{"plugin_stop", 2200, false}),
           "report close should enqueue");
     worker.Stop();

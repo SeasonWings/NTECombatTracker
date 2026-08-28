@@ -24,6 +24,7 @@ struct NteOverlaySnapshot {
         bool producer_stopping{};
         bool capture_available{};
         std::string capture_status;
+        std::string control_status;
         std::string report_id;
         std::string encounter_id;
         std::string primary_target;
@@ -43,6 +44,7 @@ struct NteOverlaySnapshot {
     const bool producer_stopping{};
     const bool capture_available{};
     const std::string capture_status;
+    const std::string control_status;
     const std::string report_id;
     const std::string encounter_id;
     const std::string primary_target;

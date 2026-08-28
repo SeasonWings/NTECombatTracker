@@ -22,8 +22,16 @@ namespace {
 constexpr std::size_t kMaximumQueuedEvents = 8192;
 
 struct DeleteCommand { std::string report_id; };
+struct FlushState {
+    std::mutex mutex;
+    std::condition_variable completed;
+    bool done{};
+    bool succeeded{};
+    std::string error;
+};
+struct FlushCommand { std::shared_ptr<FlushState> state; };
 using Command = std::variant<ReportOpen, EncounterOpen, LoggedDamage,
-    EncounterClose, ReportClose, DeleteCommand>;
+    EncounterClose, ReportClose, DeleteCommand, FlushCommand>;
 
 }  // namespace
 
@@ -106,6 +114,7 @@ struct DamageLogWorker::Impl {
             error.clear();
             bool refresh_history{};
             bool reset_drop_status{};
+            std::shared_ptr<FlushState> flush_state;
             try {
             if (has_command) {
                 std::visit([&](auto& value) {
@@ -178,6 +187,10 @@ struct DamageLogWorker::Impl {
                     } else if constexpr (std::is_same_v<Value, DeleteCommand>) {
                         succeeded = repository.DeleteReport(value.report_id, error);
                         refresh_history = true;
+                    } else if constexpr (std::is_same_v<Value, FlushCommand>) {
+                        flush_state = value.state;
+                        succeeded = repository.Flush(error);
+                        refresh_history = true;
                     }
                 }, command);
             }
@@ -211,6 +224,14 @@ struct DamageLogWorker::Impl {
                 status.last_error = pending_write_error;
             }
             if (refresh_history) status.history = repository.History();
+            if (flush_state) {
+                std::scoped_lock completion_lock(flush_state->mutex);
+                flush_state->succeeded = succeeded && !pending_write_failure;
+                flush_state->error = flush_state->succeeded ? std::string{} :
+                    (status.last_error.empty() ? "log flush failed" : status.last_error);
+                flush_state->done = true;
+                flush_state->completed.notify_all();
+            }
         }
         std::string flush_error;
         if (!repository.Flush(flush_error)) {
@@ -290,6 +311,23 @@ bool DamageLogWorker::Submit(const EncounterClose& command) {
 }
 bool DamageLogWorker::Submit(const ReportClose& command) {
     return impl_->SubmitControl(command);
+}
+bool DamageLogWorker::FlushAndWait(
+    const std::chrono::milliseconds timeout,
+    std::string& error) {
+    error.clear();
+    auto state = std::make_shared<FlushState>();
+    if (!impl_->SubmitControl(FlushCommand{state})) {
+        error = "log worker is not accepting commands";
+        return false;
+    }
+    std::unique_lock lock(state->mutex);
+    if (!state->completed.wait_for(lock, timeout, [&] { return state->done; })) {
+        error = "timed out waiting for log flush";
+        return false;
+    }
+    error = state->error;
+    return state->succeeded;
 }
 bool DamageLogWorker::DeleteReport(std::string report_id) {
     return impl_->SubmitControl(DeleteCommand{std::move(report_id)});

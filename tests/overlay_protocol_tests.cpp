@@ -28,6 +28,7 @@ NteOverlaySnapshot ExampleSnapshot() {
     message.sent_utc_ms = 1'725'000'000'123;
     message.capture_available = true;
     message.capture_status = "available";
+    message.control_status = "manual_end_completed";
     message.report_id = "report-id";
     message.encounter_id = "encounter-id";
     message.primary_target = "训练目标·甲";
@@ -63,7 +64,26 @@ NteOverlaySnapshot ExampleSnapshot() {
     player.encounter_dps = 56.0;
     player.active_dps = 70.0;
     player.rolling_dps = 40.0;
+    player.incoming_damage = 45;
+    player.incoming_positive_hits = 3;
+    player.maximum_incoming_hit = 20;
+    player.incoming_share = 100.0;
     message.combat.players.push_back(std::move(player));
+    nte::combat_stats::RecentEvent event;
+    event.sequence = 99;
+    event.tick_sequence = 100;
+    event.flags = 0x0f;
+    event.direction = nte::combat_stats::EventDirection::Outgoing;
+    event.source_id = std::numeric_limits<std::uint64_t>::max() - 3;
+    event.attacker_handle = {91, 2};
+    event.victim_handle = {92, 3};
+    event.final_damage = 500;
+    event.received_utc_ms = message.sent_utc_ms;
+    event.received_offset_us = 2'500'000;
+    event.source = "Skill";
+    event.attacker = "Player";
+    event.victim = "Enemy";
+    message.combat.recent_events.push_back(std::move(event));
     message.combat.controlled_character_count = 1;
     return NteOverlaySnapshot(std::move(message));
 }
@@ -84,6 +104,8 @@ void RoundTripPreservesVersionedNteSnapshot() {
           "int64 damage must retain decimal precision");
     Check(parsed->primary_target == expected.primary_target,
           "Unicode target names must round-trip");
+    Check(parsed->control_status == "manual_end_completed",
+          "optional control status should round-trip");
     Check(parsed->combat.players.size() == 1,
           "player rows should round-trip");
     if (!parsed->combat.players.empty()) {
@@ -92,6 +114,44 @@ void RoundTripPreservesVersionedNteSnapshot() {
               "generation handle ids must retain precision");
         Check(player.maximum_source_name == "终结技\"A\"",
               "ability names must use correct JSON escaping");
+        Check(player.incoming_damage == 45 && player.incoming_positive_hits == 3 &&
+                  player.maximum_incoming_hit == 20 && player.incoming_share == 100.0,
+              "optional incoming player metrics should round-trip");
+    }
+    Check(parsed->combat.recent_events.size() == 1 &&
+              parsed->combat.recent_events[0].source_id ==
+                  std::numeric_limits<std::uint64_t>::max() - 3 &&
+              parsed->combat.recent_events[0].attacker_handle ==
+                  nte::combat_stats::Handle{91, 2},
+          "recent event identifiers should round-trip");
+}
+
+void ParserDefaultsMissingOptionalExtensions() {
+    std::string json = nte::combat_stats::SerializeOverlaySnapshot(ExampleSnapshot());
+    const auto incoming = json.find("\"incoming_metrics\"");
+    Check(incoming != std::string::npos, "fixture should contain incoming extension");
+    if (incoming != std::string::npos) {
+        const auto begin = json.rfind(',', incoming);
+        const auto end = json.find('}', incoming);
+        json.erase(begin, end - begin + 1);
+    }
+    const auto events = json.find(",\"recent_events\"");
+    Check(events != std::string::npos, "fixture should contain recent event extension");
+    if (events != std::string::npos) {
+        const auto end = json.find("]", events);
+        json.erase(events, end - events + 1);
+    }
+    const std::string control = ",\"control_status\":\"manual_end_completed\"";
+    const auto control_at = json.find(control);
+    Check(control_at != std::string::npos, "fixture should contain control status extension");
+    if (control_at != std::string::npos) json.erase(control_at, control.size());
+    std::string error;
+    const auto parsed = nte::combat_stats::ParseOverlaySnapshot(json, error);
+    Check(parsed.has_value(), "snapshots without optional extensions should remain compatible");
+    if (parsed) {
+        Check(parsed->combat.players[0].incoming_damage == 0 &&
+                  parsed->combat.recent_events.empty() && parsed->control_status.empty(),
+              "missing optional extensions should use zero and empty defaults");
     }
 }
 
@@ -175,6 +235,7 @@ int main() {
     ParserRejectsOversizedMessages();
     ParserRejectsForeignSemantics();
     ParserRejectsMissingRequiredFieldsAndUnsupportedVersions();
+    ParserDefaultsMissingOptionalExtensions();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return 1;

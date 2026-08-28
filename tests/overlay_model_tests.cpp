@@ -66,13 +66,21 @@ void LayoutScalesAndCapsRows() {
 
 void HitTestingRespectsLockAndResizeGrip() {
     const auto layout = CalculateLayout(520.0F, 220.0F, 1.0F, false, 2);
-    Check(HitTest(layout, 100.0F, 10.0F, false) == HitRegion::Title,
+    Check(HitTest(layout, 100.0F, 20.0F, false) == HitRegion::Title,
           "unlocked title bar can move the window");
     Check(HitTest(layout, 100.0F, 40.0F, false) == HitRegion::ColumnHeader,
           "column header is interactive");
     Check(HitTest(layout, 519.0F, 219.0F, false) == HitRegion::ResizeGrip,
           "bottom-right corner can resize the window");
-    Check(HitTest(layout, 100.0F, 10.0F, true) == HitRegion::Client,
+    Check(HitTest(layout, 0.0F, 100.0F, false) == HitRegion::ResizeLeft,
+          "left edge should resize the window");
+    Check(HitTest(layout, 519.0F, 100.0F, false) == HitRegion::ResizeRight,
+          "right edge should resize the window");
+    Check(HitTest(layout, 100.0F, 219.0F, false) == HitRegion::ResizeBottom,
+          "bottom edge should resize the window");
+    Check(HitTest(layout, 0.0F, 0.0F, false) == HitRegion::ResizeTopLeft,
+          "top-left corner should take precedence over title dragging");
+    Check(HitTest(layout, 100.0F, 20.0F, true) == HitRegion::Client,
           "locked overlay does not expose interactive hit regions");
 }
 

@@ -1,5 +1,8 @@
 #include "overlay_model.hpp"
 #include "overlay_protocol.hpp"
+#include "overlay_control.hpp"
+#include "history_reader.hpp"
+#include "log_worker.hpp"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -17,6 +20,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -32,6 +36,7 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 using nte::combat_stats::EncounterState;
+using nte::combat_stats::Handle;
 using nte::combat_stats::NteOverlaySnapshot;
 using nte::combat_stats::PlayerRow;
 using nte::combat_stats::overlay::CalculateLayout;
@@ -79,6 +84,24 @@ enum MenuId : UINT {
     MenuExit,
 };
 
+enum class DataTab : std::uint8_t { Outgoing, Incoming };
+enum class ViewPage : std::uint8_t { Live, HistoryList, HistoryDetail };
+enum class DrillLevel : std::uint8_t { Players, Sources, Events };
+enum class UiAction : std::uint8_t {
+    ManualEnd,
+    ToggleHistory,
+    Back,
+    OutgoingTab,
+    IncomingTab,
+    SelectRow,
+};
+
+struct HitTarget {
+    D2D1_RECT_F rect{};
+    UiAction action{};
+    std::size_t index{};
+};
+
 struct Settings {
     int x{100};
     int y{100};
@@ -97,6 +120,7 @@ struct Settings {
     float ui_scale{1.0F};
     SortColumn sort_column{SortColumn::Damage};
     bool descending{true};
+    DataTab active_tab{DataTab::Outgoing};
 };
 
 struct OverlayColumn {
@@ -141,15 +165,43 @@ struct App {
     std::filesystem::path settings_path;
     RenderResources render;
     std::jthread receiver;
+    std::jthread lifetime_watcher;
+    std::jthread history_loader;
+    std::mutex socket_mutex;
+    HINTERNET active_socket{};
+    HINTERNET active_request{};
+    HINTERNET cancelled_request{};
     std::mutex snapshot_mutex;
     std::optional<NteOverlaySnapshot> snapshot;
     std::string connection_status{"正在连接 Runtime…"};
     std::chrono::steady_clock::time_point last_snapshot{};
-    std::chrono::steady_clock::time_point stopping_since{};
+    std::atomic_bool lifetime_guarded{};
     bool connected{};
     bool dragging{};
     POINT drag_origin{};
     RECT window_origin{};
+    HANDLE manual_end_event{};
+    ViewPage page{ViewPage::Live};
+    DrillLevel drill{DrillLevel::Players};
+    Handle selected_player;
+    nte::combat_stats::overlay::DamageSourceSummary selected_source;
+    std::size_t scroll_offset{};
+    std::size_t maximum_scroll{};
+    std::optional<std::size_t> hovered_target;
+    std::vector<HitTarget> hit_targets;
+    std::vector<nte::combat_stats::overlay::HistoricalEncounter> history;
+    std::optional<nte::combat_stats::overlay::EncounterDetail> history_detail;
+    std::vector<nte::combat_stats::overlay::CombatEventDetail> live_events;
+    std::string requested_report_id;
+    std::string requested_encounter_id;
+    std::string loaded_live_report_id;
+    std::string loaded_live_encounter_id;
+    std::string history_error;
+    std::string action_status;
+    std::vector<PlayerRow> displayed_players;
+    std::vector<nte::combat_stats::overlay::DamageSourceSummary> displayed_sources;
+    std::vector<nte::combat_stats::overlay::CombatEventDetail> displayed_events;
+    std::vector<nte::combat_stats::overlay::HistoricalEncounter> displayed_history;
 };
 
 App g_app;
@@ -185,8 +237,8 @@ bool LoadSettings() {
         auto& value = g_app.settings;
         value.x = json.value("x", value.x);
         value.y = json.value("y", value.y);
-        value.width = std::clamp(json.value("width", value.width), 360, 1400);
-        value.height = std::clamp(json.value("height", value.height), 80, 1000);
+        value.width = std::clamp(json.value("width", value.width), 420, 1400);
+        value.height = std::clamp(json.value("height", value.height), 180, 1000);
         value.locked = json.value("locked", value.locked);
         value.collapsed = json.value("collapsed", value.collapsed);
         value.topmost = json.value("topmost", value.topmost);
@@ -201,6 +253,8 @@ bool LoadSettings() {
         value.sort_column = static_cast<SortColumn>(std::clamp(
             json.value("sort_column", static_cast<int>(value.sort_column)), 0, 9));
         value.descending = json.value("descending", value.descending);
+        value.active_tab = static_cast<DataTab>(std::clamp(
+            json.value("active_tab", static_cast<int>(value.active_tab)), 0, 1));
         return true;
     } catch (...) {
         // A malformed settings file is ignored; defaults remain usable.
@@ -229,7 +283,7 @@ void SaveSettings() {
     if (error) return;
     const auto temporary = g_app.settings_path.parent_path() / L"overlay-settings.json.tmp";
     const auto& value = g_app.settings;
-    const nlohmann::json json{
+    nlohmann::json json{
         {"schema_version", 2}, {"x", value.x}, {"y", value.y},
         {"width", value.width}, {"height", value.height}, {"locked", value.locked},
         {"collapsed", value.collapsed}, {"topmost", value.topmost},
@@ -240,6 +294,7 @@ void SaveSettings() {
         {"ui_scale", value.ui_scale},
         {"sort_column", static_cast<int>(value.sort_column)},
         {"descending", value.descending}};
+    json["active_tab"] = static_cast<int>(value.active_tab);
     {
         std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
         if (!stream) return;
@@ -271,9 +326,9 @@ void RemoveTrayIcon() {
 
 void ApplyWindowMode() {
     LONG_PTR extended = GetWindowLongPtrW(g_app.window, GWL_EXSTYLE);
-    extended |= WS_EX_LAYERED | WS_EX_TOOLWINDOW;
-    if (g_app.settings.locked) extended |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
-    else extended &= ~(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE);
+    extended |= WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+    if (g_app.settings.locked) extended |= WS_EX_TRANSPARENT;
+    else extended &= ~WS_EX_TRANSPARENT;
     SetWindowLongPtrW(g_app.window, GWL_EXSTYLE, extended);
     SetWindowPos(g_app.window, g_app.settings.topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
         0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_NOACTIVATE);
@@ -320,6 +375,44 @@ std::wstring CellText(const PlayerRow& row, const SortColumn column) {
     return {};
 }
 
+std::wstring TimeText(const std::int64_t utc_ms) {
+    const std::time_t seconds = static_cast<std::time_t>(utc_ms / 1000);
+    std::tm local{};
+    if (localtime_s(&local, &seconds) != 0) return L"--:--:--";
+    return std::format(L"{:02}-{:02} {:02}:{:02}:{:02}",
+        local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec);
+}
+
+std::wstring EventTimeText(const std::int64_t utc_ms, const double relative_seconds) {
+    const std::time_t seconds = static_cast<std::time_t>(utc_ms / 1000);
+    std::tm local{};
+    if (localtime_s(&local, &seconds) != 0) {
+        return std::format(L"+{:.3f}s", relative_seconds);
+    }
+    const auto milliseconds = static_cast<int>((utc_ms % 1000 + 1000) % 1000);
+    return std::format(L"+{:.3f}s {:02}:{:02}:{:02}.{:03}", relative_seconds,
+        local.tm_hour, local.tm_min, local.tm_sec, milliseconds);
+}
+
+bool Contains(const D2D1_RECT_F& rect, const float x, const float y) {
+    return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+}
+
+std::vector<nte::combat_stats::overlay::CombatEventDetail> CanonicalPlayerEvents(
+    std::vector<nte::combat_stats::overlay::CombatEventDetail> events,
+    const PlayerRow& player) {
+    if (player.object_path.empty()) return events;
+    for (auto& event : events) {
+        if (event.attacker_name == player.object_path) event.attacker = player.handle;
+        if (event.victim_name == player.object_path) event.victim = player.handle;
+    }
+    return events;
+}
+
+std::vector<nte::combat_stats::overlay::CombatEventDetail> MergeLiveEvents(
+    const NteOverlaySnapshot& snapshot,
+    std::vector<nte::combat_stats::overlay::CombatEventDetail> events);
+
 void RenderOverlay() {
     RECT client{};
     GetClientRect(g_app.window, &client);
@@ -349,12 +442,20 @@ void RenderOverlay() {
     target->CreateSolidColorBrush(D2D1::ColorF(0xFFB454, 1.0F), &warning);
 
     std::optional<NteOverlaySnapshot> snapshot;
+    std::optional<nte::combat_stats::overlay::EncounterDetail> history_detail;
+    std::vector<nte::combat_stats::overlay::HistoricalEncounter> history;
+    std::vector<nte::combat_stats::overlay::CombatEventDetail> live_events;
     std::string status;
+    std::string history_error;
     bool connected{};
     {
         std::scoped_lock lock(g_app.snapshot_mutex);
         if (g_app.snapshot) snapshot.emplace(*g_app.snapshot);
+        if (g_app.history_detail) history_detail.emplace(*g_app.history_detail);
+        history = g_app.history;
+        live_events = g_app.live_events;
         status = g_app.connection_status;
+        history_error = g_app.history_error;
         connected = g_app.connected;
     }
     const float dpi = static_cast<float>(GetDpiForWindow(g_app.window)) / 96.0F;
@@ -384,67 +485,283 @@ void RenderOverlay() {
         light_theme ? 0xEDF2F7 : 0x10151D, g_app.settings.opacity));
     target->FillRectangle(D2D1::RectF(0, 0, layout.width, layout.title_height),
         accent.Get());
-    std::wstring title = L"NTE Combat";
-    std::wstring state = Utf16(status);
+    g_app.hit_targets.clear();
+    g_app.displayed_players.clear();
+    g_app.displayed_sources.clear();
+    g_app.displayed_events.clear();
+    g_app.displayed_history.clear();
+    const auto add_target = [&](const D2D1_RECT_F rect, const UiAction action,
+                                const std::size_t index = 0) {
+        g_app.hit_targets.push_back({rect, action, index});
+    };
+    const auto draw_cells = [&](const std::vector<std::wstring>& cells,
+                                const std::vector<float>& weights,
+                                const D2D1_RECT_F row, IDWriteTextFormat* format,
+                                ID2D1Brush* brush) {
+        float total{};
+        for (const float weight : weights) total += weight;
+        float x = row.left;
+        for (std::size_t index{}; index < cells.size(); ++index) {
+            const float next = x + (row.right - row.left) * weights[index] / total;
+            DrawTextLine(target.Get(), format, brush, cells[index],
+                D2D1::RectF(x + 6 * scale, row.top, next, row.bottom));
+            x = next;
+        }
+    };
+    DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), L"NTE Combat",
+        D2D1::RectF(8 * scale, 0, 96 * scale, layout.title_height));
+    const D2D1_RECT_F manual_rect = D2D1::RectF(
+        98 * scale, 4 * scale, 154 * scale, layout.title_height - 4 * scale);
+    const bool manual_enabled = g_app.page == ViewPage::Live && snapshot &&
+        snapshot->combat.state == EncounterState::Active;
+    if (manual_enabled) {
+        target->FillRectangle(manual_rect, warning.Get());
+        add_target(manual_rect, UiAction::ManualEnd);
+    }
+    DrawTextLine(target.Get(), scaled_small.Get(), manual_enabled ? text.Get() : muted.Get(),
+        L"结束", manual_rect);
+    const D2D1_RECT_F history_rect = D2D1::RectF(
+        layout.width - 70 * scale, 4 * scale, layout.width - 8 * scale,
+        layout.title_height - 4 * scale);
+    target->FillRectangle(history_rect, accent.Get());
+    DrawTextLine(target.Get(), scaled_small.Get(), text.Get(),
+        g_app.page == ViewPage::Live ? L"历史" : L"实时", history_rect);
+    add_target(history_rect, UiAction::ToggleHistory);
+    std::wstring title = Utf16(status);
     if (snapshot) {
-        state = connected ? StateText(*snapshot) : L"连接断开";
         const int seconds = static_cast<int>(snapshot->combat.duration_seconds);
-        title += std::format(L"  {:02}:{:02}  {}", seconds / 60, seconds % 60, state);
-        if (!snapshot->primary_target.empty()) title += L"  ·  " + Utf16(snapshot->primary_target);
+        title = std::format(L"{:02}:{:02}  {}", seconds / 60, seconds % 60,
+            connected ? StateText(*snapshot) : L"连接断开");
+        if (!snapshot->primary_target.empty()) title += L" · " + Utf16(snapshot->primary_target);
         if (snapshot->combat.quality.partial || snapshot->combat.quality.overflow ||
             snapshot->combat.quality.cursor_gap ||
-            snapshot->combat.quality.aggregate_truncated) title += L"  ⚠ DATA";
+            snapshot->combat.quality.aggregate_truncated) title += L" ⚠ DATA";
     }
-    title += g_app.settings.collapsed ? L"  ▾" : L"  ▴";
-    title += g_app.settings.locked ? L"  🔒" : L"  🔓";
+    if (!g_app.action_status.empty()) title = Utf16(g_app.action_status);
     DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), title,
-        D2D1::RectF(12 * scale, 0, layout.width - 12 * scale, layout.title_height));
+        D2D1::RectF(158 * scale, 0, layout.width - 74 * scale, layout.title_height));
 
     if (!g_app.settings.collapsed) {
-        const float top = layout.title_height;
-        const auto columns = VisibleColumns(g_app.settings);
-        float total_weight{};
-        for (const auto& column : columns) total_weight += column.weight;
-        float x{};
-        for (const auto& column : columns) {
-            const float width_share = column.weight / total_weight;
-            DrawTextLine(target.Get(), scaled_small.Get(), muted.Get(),
-                std::wstring(column.label),
-                D2D1::RectF(x + 8 * scale, top, x + layout.width * width_share,
-                            top + layout.header_height));
-            x += layout.width * width_share;
+        const float tab_height = 30 * scale;
+        const float row_height = 30 * scale;
+        const float header_height = 27 * scale;
+        float top = layout.title_height;
+        const bool show_tabs = g_app.page != ViewPage::HistoryList;
+        const float content_bottom = layout.height - (show_tabs ? tab_height : 0.0F);
+        if (show_tabs) {
+            const D2D1_RECT_F outgoing = D2D1::RectF(0, content_bottom,
+                layout.width / 2, layout.height);
+            const D2D1_RECT_F incoming = D2D1::RectF(layout.width / 2, content_bottom,
+                layout.width, layout.height);
+            target->FillRectangle(g_app.settings.active_tab == DataTab::Outgoing
+                ? outgoing : incoming, accent.Get());
+            DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), L"输出", outgoing);
+            DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), L"承伤", incoming);
+            add_target(outgoing, UiAction::OutgoingTab);
+            add_target(incoming, UiAction::IncomingTab);
         }
-        if (!snapshot || snapshot->combat.players.empty()) {
-            const std::wstring message = snapshot ? StateText(*snapshot) : Utf16(status);
-            DrawTextLine(target.Get(), scaled_regular.Get(), muted.Get(), message,
-                D2D1::RectF(12 * scale, top + layout.header_height + 12 * scale,
-                            layout.width - 12 * scale, layout.height));
+
+        if (g_app.page == ViewPage::HistoryList) {
+            draw_cells({L"时间", L"时长", L"输出", L"承伤", L"DPS", L"结束原因", L"质量"},
+                {1.8F, 0.7F, 0.9F, 0.9F, 0.9F, 1.2F, 0.7F},
+                D2D1::RectF(0, top, layout.width, top + header_height),
+                scaled_small.Get(), muted.Get());
+            top += header_height;
+            g_app.displayed_history = std::move(history);
+            const std::size_t visible = static_cast<std::size_t>(std::max(
+                0.0F, content_bottom - top) / row_height);
+            g_app.maximum_scroll = g_app.displayed_history.size() > visible
+                ? g_app.displayed_history.size() - visible : 0;
+            g_app.scroll_offset = (std::min)(g_app.scroll_offset, g_app.maximum_scroll);
+            const std::size_t count = (std::min)(visible,
+                g_app.displayed_history.size() - (std::min)(g_app.scroll_offset,
+                    g_app.displayed_history.size()));
+            for (std::size_t row{}; row < count; ++row) {
+                const std::size_t index = g_app.scroll_offset + row;
+                const auto& item = g_app.displayed_history[index];
+                const D2D1_RECT_F rect = D2D1::RectF(0, top + row * row_height,
+                    layout.width, top + (row + 1) * row_height);
+                const std::size_t target_index = g_app.hit_targets.size();
+                if (g_app.hovered_target == target_index) target->FillRectangle(rect, accent.Get());
+                draw_cells({TimeText(item.started_utc_ms),
+                    std::format(L"{:.1f}s", item.duration_seconds),
+                    CompactNumber(static_cast<double>(item.outgoing_damage)),
+                    CompactNumber(static_cast<double>(item.incoming_damage)),
+                    CompactNumber(item.encounter_dps), Utf16(item.end_reason),
+                    item.complete ? L"完整" : L"缺失"},
+                    {1.8F, 0.7F, 0.9F, 0.9F, 0.9F, 1.2F, 0.7F}, rect,
+                    scaled_regular.Get(), item.complete ? text.Get() : warning.Get());
+                add_target(rect, UiAction::SelectRow, index);
+            }
+            if (g_app.displayed_history.empty()) {
+                DrawTextLine(target.Get(), scaled_regular.Get(), muted.Get(),
+                    history_error.empty() ? L"暂无历史战斗" : Utf16(history_error),
+                    D2D1::RectF(12 * scale, top + 10 * scale,
+                        layout.width - 12 * scale, content_bottom));
+            }
         } else {
-            auto players = SortPlayers(snapshot->combat.players,
-                g_app.settings.sort_column, g_app.settings.descending);
-            const auto maximum_row = std::ranges::max_element(
-                players, {}, &PlayerRow::damage);
-            const double maximum = maximum_row == players.end()
-                ? 1.0 : std::max(1.0, static_cast<double>(maximum_row->damage));
-            for (std::size_t index = 0; index < layout.visible_rows; ++index) {
-                const PlayerRow& row = players[index];
-                const float row_top = top + layout.header_height +
-                    static_cast<float>(index) * layout.row_height;
-                const float bar_width = layout.width * static_cast<float>(
-                    std::clamp(static_cast<double>(row.damage) / maximum, 0.0, 1.0));
-                target->FillRectangle(D2D1::RectF(0, row_top, bar_width,
-                    row_top + layout.row_height - 1), accent.Get());
-                float column_x{};
-                for (std::size_t column = 0; column < columns.size(); ++column) {
-                    const float width_share = columns[column].weight / total_weight;
-                    DrawTextLine(target.Get(), scaled_regular.Get(), text.Get(),
-                        CellText(row, columns[column].sort),
-                        D2D1::RectF(column_x + 8 * scale, row_top,
-                        column_x + layout.width * width_share,
-                        row_top + layout.row_height));
-                    column_x += layout.width * width_share;
+            std::vector<PlayerRow> players;
+            std::vector<nte::combat_stats::overlay::CombatEventDetail> events;
+            std::int64_t encounter_start_utc{};
+            if (g_app.page == ViewPage::HistoryDetail) {
+                if (history_detail && history_detail->summary.report_id ==
+                        g_app.requested_report_id &&
+                    history_detail->summary.encounter_id == g_app.requested_encounter_id) {
+                    players = history_detail->players;
+                    events = history_detail->events;
+                    encounter_start_utc = history_detail->summary.started_utc_ms;
+                }
+            } else if (snapshot) {
+                players = snapshot->combat.players;
+                events = MergeLiveEvents(*snapshot, std::move(live_events));
+                encounter_start_utc = snapshot->sent_utc_ms - static_cast<std::int64_t>(
+                    snapshot->combat.duration_seconds * 1000.0);
+            }
+            if (g_app.drill != DrillLevel::Players ||
+                g_app.page == ViewPage::HistoryDetail) {
+                const D2D1_RECT_F back = D2D1::RectF(
+                    0, top, 58 * scale, top + header_height);
+                DrawTextLine(target.Get(), scaled_regular.Get(), text.Get(), L"‹ 返回", back);
+                add_target(back, UiAction::Back);
+                std::wstring breadcrumb = g_app.drill == DrillLevel::Players
+                    ? L"历史战斗" : L"角色 / 来源";
+                if (g_app.drill == DrillLevel::Events) breadcrumb += L" / 命中";
+                DrawTextLine(target.Get(), scaled_small.Get(), muted.Get(), breadcrumb,
+                    D2D1::RectF(60 * scale, top, layout.width, top + header_height));
+                top += header_height;
+            }
+            std::size_t total_rows{};
+            if (g_app.drill == DrillLevel::Players) {
+                if (g_app.settings.active_tab == DataTab::Outgoing) {
+                    players = SortPlayers(players, g_app.settings.sort_column,
+                        g_app.settings.descending);
+                } else {
+                    std::ranges::sort(players, [](const auto& left, const auto& right) {
+                        if (left.incoming_damage != right.incoming_damage) {
+                            return left.incoming_damage > right.incoming_damage;
+                        }
+                        return left.label < right.label;
+                    });
+                }
+                g_app.displayed_players = std::move(players);
+                total_rows = g_app.displayed_players.size();
+                draw_cells(g_app.settings.active_tab == DataTab::Outgoing
+                        ? std::vector<std::wstring>{L"角色", L"伤害", L"占比", L"DPS", L"暴击", L"最大"}
+                        : std::vector<std::wstring>{L"角色", L"承伤", L"占比", L"次数", L"平均", L"最大"},
+                    {2.0F, 1.1F, 0.9F, 1.0F, 0.9F, 1.1F},
+                    D2D1::RectF(0, top, layout.width, top + header_height),
+                    scaled_small.Get(), muted.Get());
+            } else {
+                const auto selected = std::ranges::find_if(players, [&](const auto& player) {
+                    return player.handle == g_app.selected_player;
+                });
+                if (selected != players.end()) events = CanonicalPlayerEvents(
+                    std::move(events), *selected);
+                const auto direction = g_app.settings.active_tab == DataTab::Outgoing
+                    ? nte::combat_stats::overlay::DetailDirection::Outgoing
+                    : nte::combat_stats::overlay::DetailDirection::Incoming;
+                if (g_app.drill == DrillLevel::Sources) {
+                    g_app.displayed_sources = nte::combat_stats::overlay::GroupDamageSources(
+                        events, g_app.selected_player, direction);
+                    total_rows = g_app.displayed_sources.size();
+                    draw_cells({L"来源", L"伤害", L"次数", L"平均", L"最大"},
+                        {2.5F, 1.1F, 0.8F, 1.0F, 1.0F},
+                        D2D1::RectF(0, top, layout.width, top + header_height),
+                        scaled_small.Get(), muted.Get());
+                } else {
+                    g_app.displayed_events = nte::combat_stats::overlay::FilterDamageEvents(
+                        events, g_app.selected_player, direction, g_app.selected_source);
+                    total_rows = g_app.displayed_events.size();
+                    draw_cells({L"相对/接收时间", L"最终", L"基础/显示", L"标记",
+                            g_app.settings.active_tab == DataTab::Outgoing ? L"目标" : L"攻击者"},
+                        {2.3F, 1.0F, 1.4F, 0.8F, 1.8F},
+                        D2D1::RectF(0, top, layout.width, top + header_height),
+                        scaled_small.Get(), muted.Get());
                 }
             }
+            top += header_height;
+            const std::size_t visible = static_cast<std::size_t>(std::max(
+                0.0F, content_bottom - top) / row_height);
+            g_app.maximum_scroll = total_rows > visible ? total_rows - visible : 0;
+            g_app.scroll_offset = (std::min)(g_app.scroll_offset, g_app.maximum_scroll);
+            const std::size_t count = (std::min)(visible,
+                total_rows - (std::min)(g_app.scroll_offset, total_rows));
+            for (std::size_t row{}; row < count; ++row) {
+                const std::size_t index = g_app.scroll_offset + row;
+                const D2D1_RECT_F rect = D2D1::RectF(0, top + row * row_height,
+                    layout.width, top + (row + 1) * row_height);
+                const std::size_t target_index = g_app.hit_targets.size();
+                if (g_app.hovered_target == target_index) target->FillRectangle(rect, accent.Get());
+                if (g_app.drill == DrillLevel::Players) {
+                    const auto& player = g_app.displayed_players[index];
+                    const bool outgoing = g_app.settings.active_tab == DataTab::Outgoing;
+                    const double average = outgoing
+                        ? (player.positive_hits == 0 ? 0.0 :
+                            static_cast<double>(player.damage) / player.positive_hits)
+                        : (player.incoming_positive_hits == 0 ? 0.0 :
+                            static_cast<double>(player.incoming_damage) /
+                                player.incoming_positive_hits);
+                    draw_cells(outgoing
+                        ? std::vector<std::wstring>{Utf16(player.label),
+                            CompactNumber(static_cast<double>(player.damage)),
+                            std::format(L"{:.1f}%", player.damage_share),
+                            CompactNumber(player.encounter_dps),
+                            std::format(L"{:.1f}%", PlayerCriticalRate(player)),
+                            CompactNumber(static_cast<double>(player.maximum_hit))}
+                        : std::vector<std::wstring>{Utf16(player.label),
+                            CompactNumber(static_cast<double>(player.incoming_damage)),
+                            std::format(L"{:.1f}%", player.incoming_share),
+                            std::to_wstring(player.incoming_positive_hits),
+                            CompactNumber(average),
+                            CompactNumber(static_cast<double>(player.maximum_incoming_hit))},
+                        {2.0F, 1.1F, 0.9F, 1.0F, 0.9F, 1.1F}, rect,
+                        scaled_regular.Get(), text.Get());
+                    add_target(rect, UiAction::SelectRow, index);
+                } else if (g_app.drill == DrillLevel::Sources) {
+                    const auto& source = g_app.displayed_sources[index];
+                    draw_cells({Utf16(source.label),
+                        CompactNumber(static_cast<double>(source.damage)),
+                        std::to_wstring(source.hits),
+                        CompactNumber(source.hits == 0 ? 0.0 :
+                            static_cast<double>(source.damage) / source.hits),
+                        CompactNumber(static_cast<double>(source.maximum_hit))},
+                        {2.5F, 1.1F, 0.8F, 1.0F, 1.0F}, rect,
+                        scaled_regular.Get(), text.Get());
+                    add_target(rect, UiAction::SelectRow, index);
+                } else {
+                    const auto& event = g_app.displayed_events[index];
+                    std::wstring flags;
+                    if ((event.flags & (1U << 1U)) != 0) flags += L"暴";
+                    if ((event.flags & (1U << 2U)) != 0) flags += L"头";
+                    if ((event.flags & (1U << 3U)) != 0) flags += L"弱";
+                    const double relative = encounter_start_utc == 0 ? 0.0 :
+                        static_cast<double>(event.received_utc_ms - encounter_start_utc) / 1000.0;
+                    draw_cells({EventTimeText(event.received_utc_ms,
+                            std::max(0.0, relative)),
+                        CompactNumber(static_cast<double>(event.final_damage)),
+                        std::format(L"{}/{}", event.basic_damage, event.display_damage),
+                        flags, Utf16(g_app.settings.active_tab == DataTab::Outgoing
+                            ? event.victim_name : event.attacker_name)},
+                        {2.3F, 1.0F, 1.4F, 0.8F, 1.8F}, rect,
+                        scaled_regular.Get(), text.Get());
+                }
+            }
+            if (total_rows == 0) {
+                const std::wstring message = g_app.page == ViewPage::HistoryDetail &&
+                        !history_detail ? L"正在加载历史战斗…" :
+                    (snapshot ? L"暂无数据" : Utf16(status));
+                DrawTextLine(target.Get(), scaled_regular.Get(), muted.Get(), message,
+                    D2D1::RectF(12 * scale, top + 10 * scale,
+                        layout.width - 12 * scale, content_bottom));
+            }
+        }
+        const float grip = 10 * scale;
+        for (int line{}; line < 3; ++line) {
+            const float offset = static_cast<float>(line) * 3 * scale;
+            target->DrawLine(D2D1::Point2F(layout.width - grip + offset,
+                    layout.height - 2 * scale),
+                D2D1::Point2F(layout.width - 2 * scale,
+                    layout.height - grip + offset), muted.Get(), scale);
         }
     }
     if (FAILED(target->EndDraw())) return;
@@ -511,7 +828,7 @@ struct HttpHandle {
 void ReceiveSnapshots(const std::stop_token stop) {
     while (!stop.stop_requested()) {
         SetConnectionStatus("正在连接 Runtime…", false);
-        HttpHandle session(WinHttpOpen(L"NteCombatOverlay/0.3.0",
+        HttpHandle session(WinHttpOpen(L"NteCombatOverlay/0.4.0",
             WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
             WINHTTP_NO_PROXY_BYPASS, 0));
         if (session.value) WinHttpSetTimeouts(session.value, 1000, 1000, 1000, 1000);
@@ -519,11 +836,24 @@ void ReceiveSnapshots(const std::stop_token stop) {
             session.value, L"127.0.0.1", g_app.port, 0) : nullptr);
         HttpHandle request(connection.value ? WinHttpOpenRequest(connection.value, L"GET", L"/",
             nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0) : nullptr);
-        if (!request.value || !WinHttpSetOption(request.value,
-                WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0) ||
-            !WinHttpSendRequest(request.value, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
-            !WinHttpReceiveResponse(request.value, nullptr)) {
+        {
+            std::scoped_lock lock(g_app.socket_mutex);
+            g_app.active_request = request.value;
+        }
+        const bool request_ready = request.value && WinHttpSetOption(request.value,
+                WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0) &&
+            WinHttpSendRequest(request.value, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+            WinHttpReceiveResponse(request.value, nullptr);
+        {
+            std::scoped_lock lock(g_app.socket_mutex);
+            if (g_app.active_request == request.value) g_app.active_request = nullptr;
+            if (g_app.cancelled_request == request.value) {
+                request.value = nullptr;
+                g_app.cancelled_request = nullptr;
+            }
+        }
+        if (!request_ready) {
             SetConnectionStatus("Runtime WebSocket 未连接", false);
             for (int i = 0; i < 20 && !stop.stop_requested(); ++i) Sleep(100);
             continue;
@@ -535,6 +865,10 @@ void ReceiveSnapshots(const std::stop_token stop) {
             continue;
         }
         SetConnectionStatus("已连接，等待 NTE 数据", true);
+        {
+            std::scoped_lock lock(g_app.socket_mutex);
+            g_app.active_socket = socket.value;
+        }
         std::vector<char> message;
         message.reserve(8192);
         bool reconnect{};
@@ -562,14 +896,20 @@ void ReceiveSnapshots(const std::stop_token stop) {
                 std::string_view(message.data(), message.size()), error);
             message.clear();
             if (!parsed) continue;
+            if (parsed->producer_stopping) {
+                {
+                    std::scoped_lock lock(g_app.socket_mutex);
+                    if (g_app.active_socket == socket.value) g_app.active_socket = nullptr;
+                }
+                PostMessageW(g_app.window, WM_CLOSE, 0, 0);
+                return;
+            }
             bool redraw = true;
             {
                 std::scoped_lock lock(g_app.snapshot_mutex);
                 if (g_app.snapshot && parsed->producer_instance_id ==
                         g_app.snapshot->producer_instance_id &&
                     parsed->snapshot_sequence <= g_app.snapshot->snapshot_sequence) continue;
-                if (parsed->producer_stopping) g_app.stopping_since = std::chrono::steady_clock::now();
-                else g_app.stopping_since = {};
                 if (g_app.snapshot && parsed->combat.state == EncounterState::Idle &&
                     g_app.snapshot->combat.state == EncounterState::Idle &&
                     parsed->capture_available == g_app.snapshot->capture_available &&
@@ -584,10 +924,158 @@ void ReceiveSnapshots(const std::stop_token stop) {
             }
             if (redraw) PostMessageW(g_app.window, kSnapshotMessage, 0, 0);
         }
+        {
+            std::scoped_lock lock(g_app.socket_mutex);
+            if (g_app.active_socket == socket.value) g_app.active_socket = nullptr;
+        }
         WinHttpWebSocketClose(socket.value, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
             nullptr, 0);
         SetConnectionStatus("连接断开，正在重连…", false);
         for (int i = 0; i < 10 && !stop.stop_requested(); ++i) Sleep(100);
+    }
+}
+
+void LoadHistoryData(const std::stop_token stop) {
+    nte::combat_stats::overlay::CombatLogReader reader(
+        nte::damage_log::DefaultLogRoot());
+    while (!stop.stop_requested()) {
+        std::string history_error;
+        auto history = reader.History(history_error);
+        std::string live_report;
+        std::string live_encounter;
+        std::string requested_report;
+        std::string requested_encounter;
+        bool load_detail{};
+        {
+            std::scoped_lock lock(g_app.snapshot_mutex);
+            if (g_app.snapshot) {
+                live_report = g_app.snapshot->report_id;
+                live_encounter = g_app.snapshot->encounter_id;
+            }
+            requested_report = g_app.requested_report_id;
+            requested_encounter = g_app.requested_encounter_id;
+            load_detail = !requested_report.empty() && !requested_encounter.empty() &&
+                (!g_app.history_detail ||
+                 g_app.history_detail->summary.report_id != requested_report ||
+                 g_app.history_detail->summary.encounter_id != requested_encounter);
+        }
+        std::string live_error;
+        std::vector<nte::combat_stats::overlay::CombatEventDetail> live_events;
+        if (!live_report.empty() && !live_encounter.empty()) {
+            live_events = reader.Events(live_report, live_encounter, live_error);
+        }
+        std::string detail_error;
+        std::optional<nte::combat_stats::overlay::EncounterDetail> detail;
+        if (load_detail) {
+            detail = reader.Encounter(requested_report, requested_encounter, detail_error);
+        }
+        {
+            std::scoped_lock lock(g_app.snapshot_mutex);
+            if (history_error.empty()) g_app.history = std::move(history);
+            g_app.history_error = !detail_error.empty() ? detail_error :
+                (!live_error.empty() ? live_error : history_error);
+            if (live_error.empty() && g_app.snapshot &&
+                g_app.snapshot->report_id == live_report &&
+                g_app.snapshot->encounter_id == live_encounter) {
+                g_app.live_events = std::move(live_events);
+                g_app.loaded_live_report_id = std::move(live_report);
+                g_app.loaded_live_encounter_id = std::move(live_encounter);
+            }
+            if (detail_error.empty() && detail &&
+                g_app.requested_report_id == requested_report &&
+                g_app.requested_encounter_id == requested_encounter) {
+                g_app.history_detail = std::move(detail);
+            }
+        }
+        if (g_app.window != nullptr) PostMessageW(g_app.window, kSnapshotMessage, 0, 0);
+        for (int count{}; count < 10 && !stop.stop_requested(); ++count) Sleep(100);
+    }
+}
+
+nte::combat_stats::overlay::CombatEventDetail ConvertRecentEvent(
+    const nte::combat_stats::RecentEvent& event,
+    const std::string& encounter_id) {
+    nte::combat_stats::overlay::CombatEventDetail result;
+    result.encounter_id = encounter_id;
+    result.sequence = event.sequence;
+    result.tick_sequence = event.tick_sequence;
+    result.flags = event.flags;
+    result.source_id = event.source_id;
+    result.attacker = event.attacker_handle;
+    result.victim = event.victim_handle;
+    result.final_damage = event.final_damage;
+    result.basic_damage = event.basic_damage;
+    result.display_damage = event.display_damage;
+    result.received_utc_ms = event.received_utc_ms;
+    result.received_offset_us = event.received_offset_us;
+    result.source = event.source;
+    result.attacker_name = event.attacker;
+    result.victim_name = event.victim;
+    return result;
+}
+
+std::vector<nte::combat_stats::overlay::CombatEventDetail> MergeLiveEvents(
+    const NteOverlaySnapshot& snapshot,
+    std::vector<nte::combat_stats::overlay::CombatEventDetail> events) {
+    for (const auto& recent : snapshot.combat.recent_events) {
+        events.push_back(ConvertRecentEvent(recent, snapshot.encounter_id));
+    }
+    std::ranges::sort(events, {},
+        &nte::combat_stats::overlay::CombatEventDetail::sequence);
+    events.erase(std::unique(events.begin(), events.end(), [](const auto& left,
+                     const auto& right) { return left.sequence == right.sequence; }),
+        events.end());
+    return events;
+}
+
+void WatchLifetime(const std::stop_token stop, const DWORD host_process_id) {
+    HANDLE stopping = OpenEventW(SYNCHRONIZE, FALSE,
+        nte::combat_stats::overlay::kPluginStoppingEventName);
+    HANDLE host = host_process_id == 0 ? nullptr :
+        OpenProcess(SYNCHRONIZE, FALSE, host_process_id);
+    std::array<HANDLE, 2> handles{};
+    DWORD count{};
+    if (stopping != nullptr) handles[count++] = stopping;
+    if (host != nullptr) handles[count++] = host;
+    // The stop event is advisory and may be absent in older plugin builds. Only
+    // a successfully opened host-process handle makes the stale timeout unnecessary.
+    g_app.lifetime_guarded.store(host != nullptr);
+    while (!stop.stop_requested() && count != 0) {
+        const DWORD result = WaitForMultipleObjects(count, handles.data(), FALSE, 100);
+        if (result >= WAIT_OBJECT_0 && result < WAIT_OBJECT_0 + count) {
+            PostMessageW(g_app.window, WM_CLOSE, 0, 0);
+            break;
+        }
+        if (result == WAIT_FAILED) break;
+    }
+    if (host != nullptr) CloseHandle(host);
+    if (stopping != nullptr) CloseHandle(stopping);
+}
+
+void StopBackgroundWork() {
+    if (g_app.history_loader.joinable()) g_app.history_loader.request_stop();
+    if (g_app.lifetime_watcher.joinable()) g_app.lifetime_watcher.request_stop();
+    if (g_app.receiver.joinable()) g_app.receiver.request_stop();
+    {
+        std::scoped_lock lock(g_app.socket_mutex);
+        if (g_app.active_request != nullptr) {
+            g_app.cancelled_request = g_app.active_request;
+            WinHttpCloseHandle(g_app.active_request);
+            g_app.active_request = nullptr;
+        }
+        if (g_app.active_socket != nullptr) {
+            WinHttpWebSocketShutdown(g_app.active_socket,
+                WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+        }
+    }
+    if (g_app.history_loader.joinable()) {
+        g_app.history_loader.join();
+    }
+    if (g_app.lifetime_watcher.joinable()) {
+        g_app.lifetime_watcher.join();
+    }
+    if (g_app.receiver.joinable()) {
+        g_app.receiver.join();
     }
 }
 
@@ -648,8 +1136,10 @@ void ShowContextMenu(const POINT screen) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, MenuHide, L"隐藏");
     AppendMenuW(menu, MF_STRING, MenuExit, L"退出");
-    SetForegroundWindow(g_app.window);
-    TrackPopupMenu(menu, TPM_RIGHTBUTTON, screen.x, screen.y, 0, g_app.window, nullptr);
+    const UINT command = TrackPopupMenu(menu,
+        TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+        screen.x, screen.y, 0, g_app.window, nullptr);
+    if (command != 0) PostMessageW(g_app.window, WM_COMMAND, command, 0);
     DestroyMenu(menu);
 }
 
@@ -702,6 +1192,71 @@ void HandleMenu(const UINT id) {
     RenderOverlay();
 }
 
+void HandleUiAction(const HitTarget& target) {
+    switch (target.action) {
+    case UiAction::ManualEnd:
+        if (g_app.manual_end_event != nullptr && SetEvent(g_app.manual_end_event)) {
+            g_app.action_status = "正在结束当前统计…";
+        } else {
+            g_app.action_status = "手动结束失败：插件控制通道不可用";
+        }
+        break;
+    case UiAction::ToggleHistory:
+        g_app.page = g_app.page == ViewPage::Live
+            ? ViewPage::HistoryList : ViewPage::Live;
+        g_app.drill = DrillLevel::Players;
+        g_app.scroll_offset = 0;
+        break;
+    case UiAction::Back:
+        if (g_app.drill == DrillLevel::Events) g_app.drill = DrillLevel::Sources;
+        else if (g_app.drill == DrillLevel::Sources) g_app.drill = DrillLevel::Players;
+        else if (g_app.page == ViewPage::HistoryDetail) g_app.page = ViewPage::HistoryList;
+        g_app.scroll_offset = 0;
+        break;
+    case UiAction::OutgoingTab:
+        g_app.settings.active_tab = DataTab::Outgoing;
+        g_app.drill = DrillLevel::Players;
+        g_app.scroll_offset = 0;
+        SaveSettings();
+        break;
+    case UiAction::IncomingTab:
+        g_app.settings.active_tab = DataTab::Incoming;
+        g_app.drill = DrillLevel::Players;
+        g_app.scroll_offset = 0;
+        SaveSettings();
+        break;
+    case UiAction::SelectRow:
+        if (g_app.page == ViewPage::HistoryList &&
+            target.index < g_app.displayed_history.size()) {
+            const auto& encounter = g_app.displayed_history[target.index];
+            {
+                std::scoped_lock lock(g_app.snapshot_mutex);
+                g_app.requested_report_id = encounter.report_id;
+                g_app.requested_encounter_id = encounter.encounter_id;
+                if (g_app.history_detail &&
+                    (g_app.history_detail->summary.report_id != encounter.report_id ||
+                     g_app.history_detail->summary.encounter_id != encounter.encounter_id)) {
+                    g_app.history_detail.reset();
+                }
+            }
+            g_app.page = ViewPage::HistoryDetail;
+            g_app.drill = DrillLevel::Players;
+        } else if (g_app.drill == DrillLevel::Players &&
+                   target.index < g_app.displayed_players.size()) {
+            g_app.selected_player = g_app.displayed_players[target.index].handle;
+            g_app.drill = DrillLevel::Sources;
+        } else if (g_app.drill == DrillLevel::Sources &&
+                   target.index < g_app.displayed_sources.size()) {
+            g_app.selected_source = g_app.displayed_sources[target.index];
+            g_app.drill = DrillLevel::Events;
+        }
+        g_app.scroll_offset = 0;
+        break;
+    }
+    g_app.hovered_target.reset();
+    RenderOverlay();
+}
+
 LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == g_app.taskbar_created) { AddTrayIcon(); return 0; }
     if (message == kRestartMessage) { DestroyWindow(window); return 0; }
@@ -715,10 +1270,30 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         return 0;
     case kSnapshotMessage: {
         bool hide{};
+        bool active{};
+        bool has_snapshot{};
+        std::string control_status;
         {
             std::scoped_lock lock(g_app.snapshot_mutex);
             hide = g_app.settings.hide_idle && g_app.snapshot &&
                 g_app.snapshot->combat.state == EncounterState::Idle;
+            active = g_app.snapshot &&
+                g_app.snapshot->combat.state == EncounterState::Active;
+            has_snapshot = g_app.snapshot.has_value();
+            if (g_app.snapshot) control_status = g_app.snapshot->control_status;
+        }
+        if (control_status == "manual_end_completed") {
+            g_app.action_status = "当前统计已结束并写入历史";
+        } else if (control_status == "manual_end_failed") {
+            g_app.action_status = "手动结束失败：战斗日志未能完整写入";
+        } else if (has_snapshot &&
+                   (!active || g_app.action_status != "正在结束当前统计…")) {
+            g_app.action_status.clear();
+            if (!active && g_app.page == ViewPage::Live &&
+                g_app.drill != DrillLevel::Players) {
+                g_app.drill = DrillLevel::Players;
+                g_app.scroll_offset = 0;
+            }
         }
         ShowWindow(window, hide ? SW_HIDE : SW_SHOWNOACTIVATE);
         RenderOverlay();
@@ -732,9 +1307,8 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         bool exit{};
         {
             std::scoped_lock lock(g_app.snapshot_mutex);
-            if (g_app.stopping_since != std::chrono::steady_clock::time_point{} &&
-                now - g_app.stopping_since >= 10s) exit = true;
-            if (g_app.last_snapshot != std::chrono::steady_clock::time_point{} &&
+            if (!g_app.lifetime_guarded.load() &&
+                g_app.last_snapshot != std::chrono::steady_clock::time_point{} &&
                 now - g_app.last_snapshot >= 30s) exit = true;
         }
         if (exit) DestroyWindow(window);
@@ -756,13 +1330,86 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         const auto layout = CalculateLayout(static_cast<float>(rect.right - rect.left),
             static_cast<float>(rect.bottom - rect.top), scale,
             g_app.settings.collapsed, players);
-        switch (HitTest(layout, x, y, false)) {
+        const HitRegion region = HitTest(layout, x, y, false);
+        switch (region) {
         case HitRegion::Title: return HTCAPTION;
+        case HitRegion::ResizeLeft: return HTLEFT;
+        case HitRegion::ResizeRight: return HTRIGHT;
+        case HitRegion::ResizeTop: return HTTOP;
+        case HitRegion::ResizeBottom: return HTBOTTOM;
+        case HitRegion::ResizeTopLeft: return HTTOPLEFT;
+        case HitRegion::ResizeTopRight: return HTTOPRIGHT;
+        case HitRegion::ResizeBottomLeft: return HTBOTTOMLEFT;
         case HitRegion::ResizeGrip: return HTBOTTOMRIGHT;
-        default: return HTCLIENT;
+        default: break;
         }
+        for (const auto& target : g_app.hit_targets) {
+            if (Contains(target.rect, x, y)) return HTCLIENT;
+        }
+        return region == HitRegion::Title ? HTCAPTION : HTCLIENT;
+    }
+    case WM_SETCURSOR: {
+        CURSORINFO info{sizeof(info)};
+        if (!GetCursorInfo(&info) || (info.flags & CURSOR_SHOWING) == 0 ||
+            GetCursor() == nullptr) return TRUE;
+        LPCWSTR cursor = IDC_ARROW;
+        switch (LOWORD(lparam)) {
+        case HTLEFT: case HTRIGHT: cursor = IDC_SIZEWE; break;
+        case HTTOP: case HTBOTTOM: cursor = IDC_SIZENS; break;
+        case HTTOPLEFT: case HTBOTTOMRIGHT: cursor = IDC_SIZENWSE; break;
+        case HTTOPRIGHT: case HTBOTTOMLEFT: cursor = IDC_SIZENESW; break;
+        default: break;
+        }
+        SetCursor(LoadCursorW(nullptr, cursor));
+        return TRUE;
+    }
+    case WM_GETMINMAXINFO: {
+        auto* limits = reinterpret_cast<MINMAXINFO*>(lparam);
+        const float dpi = static_cast<float>(GetDpiForWindow(window)) / 96.0F;
+        const auto minimum = ScaleWindowExtent(420,
+            g_app.settings.collapsed ? 34 : 180, dpi, g_app.settings.ui_scale);
+        const auto maximum = ScaleWindowExtent(1400,
+            g_app.settings.collapsed ? 34 : 1000, dpi, g_app.settings.ui_scale);
+        limits->ptMinTrackSize = {minimum.width, minimum.height};
+        limits->ptMaxTrackSize = {maximum.width, maximum.height};
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        const float x = static_cast<float>(GET_X_LPARAM(lparam));
+        const float y = static_cast<float>(GET_Y_LPARAM(lparam));
+        std::optional<std::size_t> hovered;
+        for (std::size_t index{}; index < g_app.hit_targets.size(); ++index) {
+            if (Contains(g_app.hit_targets[index].rect, x, y)) {
+                hovered = index;
+                break;
+            }
+        }
+        if (hovered != g_app.hovered_target) {
+            g_app.hovered_target = hovered;
+            RenderOverlay();
+        }
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+        if (delta > 0) {
+            g_app.scroll_offset = g_app.scroll_offset > 2 ? g_app.scroll_offset - 3 : 0;
+        } else if (delta < 0) {
+            g_app.scroll_offset = (std::min)(g_app.maximum_scroll,
+                g_app.scroll_offset + 3);
+        }
+        RenderOverlay();
+        return 0;
     }
     case WM_LBUTTONUP: {
+        const float click_x = static_cast<float>(GET_X_LPARAM(lparam));
+        const float click_y = static_cast<float>(GET_Y_LPARAM(lparam));
+        for (const auto& target : g_app.hit_targets) {
+            if (Contains(target.rect, click_x, click_y)) {
+                HandleUiAction(target);
+                return 0;
+            }
+        }
         RECT rect{};
         GetClientRect(window, &rect);
         const float scale = static_cast<float>(GetDpiForWindow(window)) / 96.0F *
@@ -815,7 +1462,11 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         RemoveTrayIcon();
         UnregisterHotKey(window, kHotkeyId);
         KillTimer(window, kStaleTimerId);
-        if (g_app.receiver.joinable()) { g_app.receiver.request_stop(); g_app.receiver.join(); }
+        StopBackgroundWork();
+        if (g_app.manual_end_event != nullptr) {
+            CloseHandle(g_app.manual_end_event);
+            g_app.manual_end_event = nullptr;
+        }
         PostQuitMessage(0);
         return 0;
     }
@@ -865,6 +1516,24 @@ std::uint16_t ParsePort() {
         LocalFree(arguments);
     }
     return port;
+}
+
+DWORD ParseHostProcessId() {
+    int count{};
+    wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &count);
+    DWORD result{};
+    if (arguments) {
+        for (int index = 1; index + 1 < count; ++index) {
+            if (wcscmp(arguments[index], L"--host-pid") != 0) continue;
+            wchar_t* end{};
+            const unsigned long value = wcstoul(arguments[index + 1], &end, 10);
+            if (end != nullptr && *end == L'\0' && value != 0) {
+                result = static_cast<DWORD>(value);
+            }
+        }
+        LocalFree(arguments);
+    }
+    return result;
 }
 
 bool RestartRequested() {
@@ -936,6 +1605,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (FAILED(com)) { CloseHandle(mutex); return 1; }
     g_app.instance = instance;
     g_app.port = ParsePort();
+    const DWORD host_process_id = ParseHostProcessId();
     g_app.taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     static_cast<void>(LoadSettings());
     if (!InitializeRendering()) { CoUninitialize(); CloseHandle(mutex); return 2; }
@@ -943,7 +1613,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     WNDCLASSEXW window_class{sizeof(window_class)};
     window_class.lpfnWndProc = WindowProcedure;
     window_class.hInstance = instance;
-    window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    window_class.hCursor = nullptr;
     window_class.lpszClassName = kWindowClass;
     if (!RegisterClassExW(&window_class)) { CoUninitialize(); CloseHandle(mutex); return 3; }
     const auto initial_extent = ScaleWindowExtent(
@@ -951,7 +1621,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         g_app.settings.collapsed ? 34 : g_app.settings.height,
         static_cast<float>(GetDpiForSystem()) / 96.0F,
         g_app.settings.ui_scale);
-    g_app.window = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+    g_app.window = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         kWindowClass, kWindowTitle, WS_POPUP | WS_THICKFRAME,
         g_app.settings.x, g_app.settings.y, initial_extent.width, initial_extent.height,
         nullptr, nullptr, instance, nullptr);
@@ -970,6 +1640,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     RenderOverlay();
     g_app.last_snapshot = std::chrono::steady_clock::now();
     g_app.receiver = std::jthread(ReceiveSnapshots);
+    g_app.lifetime_watcher = std::jthread(WatchLifetime, host_process_id);
+    g_app.manual_end_event = OpenEventW(EVENT_MODIFY_STATE, FALSE,
+        nte::combat_stats::overlay::kManualEndEventName);
+    g_app.history_loader = std::jthread(LoadHistoryData);
 
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {

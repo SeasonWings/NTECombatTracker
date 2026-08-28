@@ -42,10 +42,12 @@ anomaly-test-host --plugin .\build\package\NteCombatStats --reload 10 --ticks 60
 
 ## Win32 Overlay
 
-插件从自身包目录自动启动 `NteCombatOverlay.exe`。Overlay 默认 520×220、透明置顶，按角色显示伤害、占比、遭遇 DPS、暴击率和最大一击；右键可选择爆头率、弱点率、活跃 DPS、10 秒 DPS、主题、透明度、缩放、置顶和离战隐藏。
+插件从自身包目录自动启动 `NteCombatOverlay.exe`。Overlay 默认 520×220、透明置顶，支持输出/承伤页签、角色→技能来源→逐次命中的同窗钻取，以及只读历史战斗查看。标题栏可手动结束当前统计；结束后实时页清空，结果保存到历史。
 
-- 点击列头切换排序；拖动顶栏移动，右下角缩放。
+- 点击列头切换排序；拖动顶栏移动，四边与四角均可缩放，底部页签切换输出和承伤。
+- 标题栏“历史”可浏览已关闭 Encounter；详情显示客户端接收时间、最终/基础/显示伤害和命中标记。
 - `Ctrl+Shift+F12` 切换锁定。锁定后窗口不激活并允许鼠标穿透。
+- Overlay 不会强制显示游戏当前隐藏的光标；游戏进程或插件停止时会立即退出。
 - 托盘菜单可显示、隐藏、解锁和退出。
 - 配置保存在 `%LOCALAPPDATA%\NTECombatStats\overlay-settings.json`。
 - Overlay 只接收自有 `NteOverlaySnapshot`，不使用 ACT `CombatData`、OverlayPlugin、CEF 或 WebView2。

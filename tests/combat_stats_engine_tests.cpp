@@ -91,6 +91,10 @@ void ActiveEncounterCapturesEveryVisibleDamageField() {
           "visible damage should be retained in the recent event stream");
     if (snapshot.recent_events.size() == 2) {
         const auto& recent = snapshot.recent_events.back();
+        Check(recent.source_id == visible.source_id &&
+                  recent.attacker_handle == visible.attacker &&
+                  recent.victim_handle == visible.victim,
+              "recent events should retain stable source and participant identifiers");
         Check(recent.tick_sequence == 77 && recent.flags == 0x0f,
               "sequence metadata should be retained");
         Check(recent.display_damage == 31 && recent.basic_damage == 29 &&
@@ -311,10 +315,13 @@ void DirectionAndNonPositiveRules() {
     auto incoming = Outgoing(1, world, {40, 1}, 80);
     incoming.victim = first;
     incoming.attacker_name = "EnemyA";
+    incoming.victim_name = "/Game/Player/player_first_C";
     engine.AcceptDamage(incoming, start);
 
     auto both = Outgoing(2, world, first, 30);
     both.victim = second;
+    both.attacker_name = "/Game/Player/player_first_C";
+    both.victim_name = "/Game/Player/player_second_C";
     engine.AcceptDamage(both, start + 1s);
 
     engine.AcceptDamage(Outgoing(3, world, first, 0), start + 2s);
@@ -331,6 +338,20 @@ void DirectionAndNonPositiveRules() {
         Check(snapshot.recent_events[1].direction == nte::combat_stats::EventDirection::Both,
               "controlled-to-controlled event should be marked both");
     }
+    const auto first_row = std::ranges::find_if(snapshot.players,
+        [&](const auto& row) { return row.handle == first; });
+    const auto second_row = std::ranges::find_if(snapshot.players,
+        [&](const auto& row) { return row.handle == second; });
+    Check(first_row != snapshot.players.end() && first_row->incoming_damage == 80 &&
+              first_row->incoming_positive_hits == 1 &&
+              first_row->maximum_incoming_hit == 80,
+          "incoming damage should aggregate on the controlled victim row");
+    Check(second_row != snapshot.players.end() && second_row->incoming_damage == 30 &&
+              second_row->incoming_positive_hits == 1,
+          "controlled-to-controlled damage should aggregate on the victim only");
+    Check(first_row != snapshot.players.end() && first_row->incoming_share > 72.7 &&
+              first_row->incoming_share < 72.8,
+          "incoming share should use total encounter incoming damage");
 }
 
 void EncounterAndRollingDps() {
