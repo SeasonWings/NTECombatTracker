@@ -22,13 +22,15 @@ FetchContent_MakeAvailable(nlohmann_json)
 
 add_library(nte_combat_stats_engine STATIC
     src/combat_stats_engine.cpp
+    src/name_catalog.cpp
     src/damage_cursor.cpp
     src/damage_log.cpp
     src/log_worker.cpp)
 target_include_directories(nte_combat_stats_engine PUBLIC include)
 target_compile_definitions(nte_combat_stats_engine PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(nte_combat_stats_engine PUBLIC bcrypt shell32 ole32)
+target_link_libraries(nte_combat_stats_engine PUBLIC
+    bcrypt shell32 ole32 nlohmann_json::nlohmann_json)
 if(MSVC)
     target_compile_options(nte_combat_stats_engine PRIVATE /W4 /permissive- /EHsc /utf-8)
 endif()
@@ -107,6 +109,13 @@ if(BUILD_TESTING)
         target_compile_options(nte_history_reader_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
     endif()
     add_test(NAME nte_history_reader COMMAND nte_history_reader_tests)
+
+    add_executable(nte_name_catalog_tests tests/name_catalog_tests.cpp)
+    target_link_libraries(nte_name_catalog_tests PRIVATE nte_combat_stats_engine)
+    if(MSVC)
+        target_compile_options(nte_name_catalog_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME nte_name_catalog COMMAND nte_name_catalog_tests)
 endif()
 
 option(NTE_COMBAT_STATS_BUILD_PLUGIN "Build the Anomaly plugin package" ON)

@@ -167,6 +167,56 @@ void HitTestingRespectsLockAndResizeGrip() {
           "locked overlay does not expose interactive hit regions");
 }
 
+void TitleControlsTakePrecedenceOverWindowDragging() {
+    const std::array controls{
+        ViewRect{8.0F, 8.0F, 36.0F, 32.0F},
+        ViewRect{42.0F, 8.0F, 84.0F, 32.0F},
+        ViewRect{440.0F, 8.0F, 476.0F, 32.0F},
+        ViewRect{480.0F, 8.0F, 516.0F, 32.0F},
+    };
+    for (const auto& control : controls) {
+        const float x = (control.left + control.right) / 2.0F;
+        const float y = (control.top + control.bottom) / 2.0F;
+        Check(ResolveWindowHit(HitRegion::Title, x, y, controls) == HitRegion::Client,
+            "title controls must receive client clicks instead of dragging the window");
+    }
+    Check(ResolveWindowHit(HitRegion::Title, 200.0F, 20.0F, controls) ==
+              HitRegion::Title,
+        "unused title space remains draggable");
+    Check(ResolveWindowHit(HitRegion::ResizeTop, 20.0F, 2.0F, controls) ==
+              HitRegion::ResizeTop,
+        "resize edges keep precedence over title controls");
+}
+
+void NavigationSurvivesRefreshesWithinTheSameEncounter() {
+    NavigationState state;
+    state.page = ViewPage::Live;
+    state.drill = DrillLevel::Events;
+    state.encounter_key = "report/encounter-a";
+    state.player_key = "/Game/Player/A";
+    state.source_key = "42|/Game/Ability/A";
+    state.scroll_offset = 3;
+    const std::array players{std::string{"/Game/Player/A"}};
+    const std::array sources{std::string{"42|/Game/Ability/A"}};
+
+    ReconcileLiveNavigation(
+        state, "report/encounter-a", players, sources);
+    Check(state.drill == DrillLevel::Events && state.scroll_offset == 3,
+        "idle and incremental refreshes for the same encounter preserve drill navigation");
+
+    ReconcileLiveNavigation(
+        state, "report/encounter-b", players, sources);
+    Check(state.drill == DrillLevel::Players && state.player_key.empty() &&
+              state.source_key.empty() && state.scroll_offset == 0,
+        "a genuine encounter transition returns live navigation to players");
+
+    state.drill = DrillLevel::Sources;
+    state.player_key = "/Game/Player/Missing";
+    ReconcileLiveNavigation(state, "report/encounter-b", players, {});
+    Check(state.drill == DrillLevel::Players,
+        "a missing selected player safely returns to the player list");
+}
+
 void WindowExtentPreservesLogicalSizeAcrossDpiAndUiScale() {
     const auto normal = ScaleWindowExtent(520, 220, 1.0F, 1.0F);
     Check(normal.width == 520 && normal.height == 220,
@@ -192,6 +242,8 @@ int main() {
     SortsEachSupportedMetricStably();
     LayoutScalesAndCapsRows();
     HitTestingRespectsLockAndResizeGrip();
+    TitleControlsTakePrecedenceOverWindowDragging();
+    NavigationSurvivesRefreshesWithinTheSameEncounter();
     WindowExtentPreservesLogicalSizeAcrossDpiAndUiScale();
     ReferenceVisualModelIsDeterministic();
     TextAndFooterLayoutMatchTheOverlayContract();

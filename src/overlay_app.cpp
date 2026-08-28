@@ -3,6 +3,7 @@
 #include "overlay_control.hpp"
 #include "history_reader.hpp"
 #include "log_worker.hpp"
+#include "name_catalog.hpp"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -58,6 +59,7 @@ constexpr UINT kSnapshotMessage = WM_APP + 1;
 constexpr UINT kTrayMessage = WM_APP + 2;
 constexpr UINT kShowMessage = WM_APP + 3;
 constexpr UINT kRestartMessage = WM_APP + 4;
+constexpr UINT kHistoryRefreshMessage = WM_APP + 5;
 constexpr UINT kHotkeyId = 1;
 constexpr UINT_PTR kStaleTimerId = 1;
 constexpr UINT kTrayId = 1;
@@ -151,6 +153,7 @@ struct App {
     HANDLE manual_end_event{};
     ViewPage page{ViewPage::Live};
     DrillLevel drill{DrillLevel::Players};
+    nte::combat_stats::overlay::NavigationState navigation;
     Handle selected_player;
     nte::combat_stats::overlay::DamageSourceSummary selected_source;
     std::size_t scroll_offset{};
@@ -170,9 +173,19 @@ struct App {
     std::vector<nte::combat_stats::overlay::DamageSourceSummary> displayed_sources;
     std::vector<nte::combat_stats::overlay::CombatEventDetail> displayed_events;
     std::vector<nte::combat_stats::overlay::HistoricalEncounter> displayed_history;
+    nte::combat_stats::NameCatalog name_catalog;
+    std::filesystem::path name_catalog_path;
+    std::string name_catalog_build;
+    std::string name_catalog_error;
 };
 
 App g_app;
+
+bool HasRecordedDisplayName(
+    const std::string& display_name,
+    const std::string& origin) {
+    return !display_name.empty() && origin != "technical" && origin != "unknown";
+}
 
 std::wstring Utf16(const std::string& text) {
     if (text.empty()) return {};
@@ -183,6 +196,17 @@ std::wstring Utf16(const std::string& text) {
     MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
         static_cast<int>(text.size()), result.data(), size);
     return result;
+}
+
+std::string PlayerKey(const PlayerRow& player) {
+    return player.identity_key.empty() ? player.label : player.identity_key;
+}
+
+std::string SourceKey(
+    const nte::combat_stats::overlay::DamageSourceSummary& source) {
+    return std::to_string(source.source_id) + "|" + source.source_name + "|" +
+        std::to_string(source.participant.id) + ":" +
+        std::to_string(source.participant.generation);
 }
 
 std::filesystem::path SettingsPath() {
@@ -437,6 +461,7 @@ void RenderOverlay() {
     std::vector<nte::combat_stats::overlay::CombatEventDetail> live_events;
     std::string status;
     std::string history_error;
+    nte::combat_stats::NameCatalog name_catalog;
     bool connected{};
     {
         std::scoped_lock lock(g_app.snapshot_mutex);
@@ -447,6 +472,47 @@ void RenderOverlay() {
         status = g_app.connection_status;
         history_error = g_app.history_error;
         connected = g_app.connected;
+        name_catalog = g_app.name_catalog;
+    }
+    if (history_detail) {
+        for (auto& player : history_detail->players) {
+            const auto character = name_catalog.Character(player.object_path);
+            if (!HasRecordedDisplayName(player.display_name, player.name_origin) &&
+                character.origin == nte::combat_stats::NameOrigin::Catalog) {
+                player.display_name = character.display_name;
+                player.label = character.display_name;
+                player.name_origin = std::string(
+                    nte::combat_stats::NameOriginName(character.origin));
+                player.name_catalog_version = character.catalog_version;
+            }
+            const auto source = name_catalog.DamageSource(
+                player.maximum_source_name);
+            if (!HasRecordedDisplayName(player.maximum_source_display_name,
+                    player.maximum_source_name_origin) &&
+                source.origin == nte::combat_stats::NameOrigin::Catalog) {
+                player.maximum_source_display_name = source.display_name;
+            }
+        }
+        for (auto& event : history_detail->events) {
+            const auto source = name_catalog.DamageSource(event.source);
+            const auto attacker = name_catalog.Character(event.attacker_name);
+            const auto victim = name_catalog.Character(event.victim_name);
+            if (!HasRecordedDisplayName(event.source_display_name,
+                    event.source_name_origin) &&
+                source.origin == nte::combat_stats::NameOrigin::Catalog) {
+                event.source_display_name = source.display_name;
+            }
+            if (!HasRecordedDisplayName(event.attacker_display_name,
+                    event.attacker_name_origin) &&
+                attacker.origin == nte::combat_stats::NameOrigin::Catalog) {
+                event.attacker_display_name = attacker.display_name;
+            }
+            if (!HasRecordedDisplayName(event.victim_display_name,
+                    event.victim_name_origin) &&
+                victim.origin == nte::combat_stats::NameOrigin::Catalog) {
+                event.victim_display_name = victim.display_name;
+            }
+        }
     }
     const float dpi = static_cast<float>(GetDpiForWindow(g_app.window)) / 96.0F;
     const float scale = dpi * g_app.settings.ui_scale;
@@ -544,6 +610,13 @@ void RenderOverlay() {
         time = std::format(L"{:02}:{:02}", seconds / 60, seconds % 60);
         target_name = Utf16(history_detail->summary.end_reason);
         if (!history_detail->summary.complete) target_name += L" ⚠ 数据不完整";
+        if (history_detail->summary.critical_data_status ==
+            nte::combat_stats::CriticalDataStatus::Unavailable) {
+            target_name += L"｜暴击数据不可用";
+        } else if (history_detail->summary.critical_data_status ==
+                   nte::combat_stats::CriticalDataStatus::Partial) {
+            target_name += L"｜暴击数据不完整";
+        }
     } else if (g_app.page == ViewPage::HistoryList) {
         target_name = std::format(L"{} 场已结束战斗", history.size());
     } else if (snapshot) {
@@ -555,6 +628,13 @@ void RenderOverlay() {
         if (snapshot->combat.quality.partial || snapshot->combat.quality.overflow ||
             snapshot->combat.quality.cursor_gap ||
             snapshot->combat.quality.aggregate_truncated) target_name += L" ⚠";
+        if (snapshot->combat.critical_data_status ==
+            nte::combat_stats::CriticalDataStatus::Unavailable) {
+            target_name += L"｜暴击数据不可用";
+        } else if (snapshot->combat.critical_data_status ==
+                   nte::combat_stats::CriticalDataStatus::Partial) {
+            target_name += L"｜暴击数据不完整";
+        }
     }
     if (!g_app.action_status.empty()) target_name = Utf16(g_app.action_status);
     DrawTextLine(target.Get(), scaled_bold.Get(), accent.Get(), time,
@@ -719,16 +799,38 @@ void RenderOverlay() {
                     scaled_small.Get(), muted.Get(), true);
             } else {
                 const auto selected = std::ranges::find_if(players, [&](const auto& player) {
-                    return player.handle == g_app.selected_player;
+                    return !g_app.navigation.player_key.empty()
+                        ? PlayerKey(player) == g_app.navigation.player_key
+                        : player.handle == g_app.selected_player;
                 });
-                if (selected != players.end()) events = CanonicalPlayerEvents(
-                    std::move(events), *selected);
+                if (selected != players.end()) {
+                    g_app.selected_player = selected->handle;
+                    events = CanonicalPlayerEvents(std::move(events), *selected);
+                }
                 const auto direction = g_app.settings.active_tab == DataTab::Outgoing
                     ? nte::combat_stats::overlay::DetailDirection::Outgoing
                     : nte::combat_stats::overlay::DetailDirection::Incoming;
+                auto grouped_sources = nte::combat_stats::overlay::GroupDamageSources(
+                    events, g_app.selected_player, direction);
+                if (g_app.drill == DrillLevel::Events) {
+                    const auto rebound = std::ranges::find_if(
+                        grouped_sources, [&](const auto& source) {
+                            return SourceKey(source) == g_app.navigation.source_key;
+                        });
+                    // Live disk events may lag the snapshot. An empty source list
+                    // is a loading state, not proof that the selection vanished.
+                    if (rebound == grouped_sources.end() && !grouped_sources.empty()) {
+                        g_app.drill = DrillLevel::Sources;
+                        g_app.navigation.drill =
+                            nte::combat_stats::overlay::DrillLevel::Sources;
+                        g_app.navigation.source_key.clear();
+                        g_app.scroll_offset = 0;
+                    } else {
+                        g_app.selected_source = *rebound;
+                    }
+                }
                 if (g_app.drill == DrillLevel::Sources) {
-                    g_app.displayed_sources = nte::combat_stats::overlay::GroupDamageSources(
-                        events, g_app.selected_player, direction);
+                    g_app.displayed_sources = std::move(grouped_sources);
                     total_rows = g_app.displayed_sources.size();
                     draw_cells({L"来源", L"伤害", L"次数", L"平均", L"最大"},
                         {2.5F, 1.1F, 0.8F, 1.0F, 1.0F},
@@ -792,7 +894,8 @@ void RenderOverlay() {
                             static_cast<double>(player.incoming_damage) /
                                 player.incoming_positive_hits);
                     draw_cells(outgoing
-                        ? std::vector<std::wstring>{Utf16(player.label),
+                        ? std::vector<std::wstring>{Utf16(player.display_name.empty()
+                                ? player.label : player.display_name),
                             std::to_wstring(player.damage),
                             std::format(L"{:.0f}", player.encounter_dps),
                             std::format(L"{}%", nte::combat_stats::overlay::RoundedPercent(
@@ -800,8 +903,11 @@ void RenderOverlay() {
                             std::format(L"{}%", nte::combat_stats::overlay::RoundedPercent(
                                 PlayerCriticalRate(player))),
                             std::format(L"{} {}", player.maximum_hit,
-                                Utf16(player.maximum_source_name))}
-                        : std::vector<std::wstring>{Utf16(player.label),
+                                Utf16(player.maximum_source_display_name.empty()
+                                    ? player.maximum_source_name
+                                    : player.maximum_source_display_name))}
+                        : std::vector<std::wstring>{Utf16(player.display_name.empty()
+                                ? player.label : player.display_name),
                             CompactNumber(static_cast<double>(player.incoming_damage)),
                             std::format(L"{:.1f}%", player.incoming_share),
                             std::to_wstring(player.incoming_positive_hits),
@@ -851,7 +957,10 @@ void RenderOverlay() {
                         CompactNumber(static_cast<double>(event.final_damage)),
                         std::format(L"{}/{}", event.basic_damage, event.display_damage),
                         flags, Utf16(g_app.settings.active_tab == DataTab::Outgoing
-                            ? event.victim_name : event.attacker_name)},
+                            ? (event.victim_display_name.empty()
+                                ? event.victim_name : event.victim_display_name)
+                            : (event.attacker_display_name.empty()
+                                ? event.attacker_name : event.attacker_display_name))},
                         {2.3F, 1.0F, 1.4F, 0.8F, 1.8F}, rect,
                         scaled_regular.Get(), text.Get());
                 }
@@ -1080,6 +1189,14 @@ void LoadHistoryData(const std::stop_token stop) {
         if (load_detail) {
             detail = reader.Encounter(requested_report, requested_encounter, detail_error);
         }
+        nte::combat_stats::NameCatalog detail_catalog;
+        std::string detail_catalog_error;
+        if (detail) {
+            detail_catalog = nte::combat_stats::NameCatalog::Load(
+                g_app.name_catalog_path, detail->summary.game_build,
+                detail_catalog_error);
+        }
+        bool definitive_detail_failure{};
         {
             std::scoped_lock lock(g_app.snapshot_mutex);
             if (history_error.empty()) g_app.history = std::move(history);
@@ -1096,9 +1213,24 @@ void LoadHistoryData(const std::stop_token stop) {
                 g_app.requested_report_id == requested_report &&
                 g_app.requested_encounter_id == requested_encounter) {
                 g_app.history_detail = std::move(detail);
+                g_app.name_catalog = std::move(detail_catalog);
+                g_app.name_catalog_build = g_app.history_detail->summary.game_build;
+                g_app.name_catalog_error = std::move(detail_catalog_error);
+            } else if (load_detail &&
+                (detail_error == "encounter not found" ||
+                 detail_error == "invalid report or encounter id") &&
+                g_app.requested_report_id == requested_report &&
+                g_app.requested_encounter_id == requested_encounter) {
+                g_app.history_detail.reset();
+                g_app.requested_report_id.clear();
+                g_app.requested_encounter_id.clear();
+                definitive_detail_failure = true;
             }
         }
-        if (g_app.window != nullptr) PostMessageW(g_app.window, kSnapshotMessage, 0, 0);
+        if (g_app.window != nullptr) {
+            PostMessageW(g_app.window, kHistoryRefreshMessage,
+                definitive_detail_failure ? 1 : 0, 0);
+        }
         for (int count{}; count < 10 && !stop.stop_requested(); ++count) Sleep(100);
     }
 }
@@ -1120,8 +1252,11 @@ nte::combat_stats::overlay::CombatEventDetail ConvertRecentEvent(
     result.received_utc_ms = event.received_utc_ms;
     result.received_offset_us = event.received_offset_us;
     result.source = event.source;
+    result.source_display_name = event.source_display_name;
     result.attacker_name = event.attacker;
+    result.attacker_display_name = event.attacker_display_name;
     result.victim_name = event.victim;
+    result.victim_display_name = event.victim_display_name;
     return result;
 }
 
@@ -1304,6 +1439,13 @@ void HandleUiAction(const HitTarget& target) {
             ? ViewPage::HistoryList : ViewPage::Live;
         g_app.drill = DrillLevel::Players;
         g_app.scroll_offset = 0;
+        g_app.navigation.page = static_cast<
+            nte::combat_stats::overlay::ViewPage>(g_app.page);
+        g_app.navigation.drill =
+            nte::combat_stats::overlay::DrillLevel::Players;
+        g_app.navigation.player_key.clear();
+        g_app.navigation.source_key.clear();
+        g_app.navigation.scroll_offset = 0;
         break;
     case UiAction::ToggleCollapsed:
         ToggleCollapsed();
@@ -1319,17 +1461,36 @@ void HandleUiAction(const HitTarget& target) {
         else if (g_app.drill == DrillLevel::Sources) g_app.drill = DrillLevel::Players;
         else if (g_app.page == ViewPage::HistoryDetail) g_app.page = ViewPage::HistoryList;
         g_app.scroll_offset = 0;
+        g_app.navigation.page = static_cast<
+            nte::combat_stats::overlay::ViewPage>(g_app.page);
+        g_app.navigation.drill = static_cast<
+            nte::combat_stats::overlay::DrillLevel>(g_app.drill);
+        if (g_app.drill == DrillLevel::Players) {
+            g_app.navigation.player_key.clear();
+            g_app.navigation.source_key.clear();
+        } else if (g_app.drill == DrillLevel::Sources) {
+            g_app.navigation.source_key.clear();
+        }
+        g_app.navigation.scroll_offset = 0;
         break;
     case UiAction::OutgoingTab:
         g_app.settings.active_tab = DataTab::Outgoing;
         g_app.drill = DrillLevel::Players;
         g_app.scroll_offset = 0;
+        g_app.navigation.drill =
+            nte::combat_stats::overlay::DrillLevel::Players;
+        g_app.navigation.player_key.clear();
+        g_app.navigation.source_key.clear();
         SaveSettings();
         break;
     case UiAction::IncomingTab:
         g_app.settings.active_tab = DataTab::Incoming;
         g_app.drill = DrillLevel::Players;
         g_app.scroll_offset = 0;
+        g_app.navigation.drill =
+            nte::combat_stats::overlay::DrillLevel::Players;
+        g_app.navigation.player_key.clear();
+        g_app.navigation.source_key.clear();
         SaveSettings();
         break;
     case UiAction::SelectRow:
@@ -1348,16 +1509,27 @@ void HandleUiAction(const HitTarget& target) {
             }
             g_app.page = ViewPage::HistoryDetail;
             g_app.drill = DrillLevel::Players;
+            g_app.navigation.page =
+                nte::combat_stats::overlay::ViewPage::HistoryDetail;
+            g_app.navigation.drill =
+                nte::combat_stats::overlay::DrillLevel::Players;
         } else if (g_app.drill == DrillLevel::Players &&
                    target.index < g_app.displayed_players.size()) {
-            g_app.selected_player = g_app.displayed_players[target.index].handle;
+            const auto& player = g_app.displayed_players[target.index];
+            g_app.selected_player = player.handle;
+            g_app.navigation.player_key = PlayerKey(player);
+            g_app.navigation.source_key.clear();
             g_app.drill = DrillLevel::Sources;
         } else if (g_app.drill == DrillLevel::Sources &&
                    target.index < g_app.displayed_sources.size()) {
             g_app.selected_source = g_app.displayed_sources[target.index];
+            g_app.navigation.source_key = SourceKey(g_app.selected_source);
             g_app.drill = DrillLevel::Events;
         }
         g_app.scroll_offset = 0;
+        g_app.navigation.drill = static_cast<
+            nte::combat_stats::overlay::DrillLevel>(g_app.drill);
+        g_app.navigation.scroll_offset = 0;
         break;
     }
     g_app.hovered_target.reset();
@@ -1396,13 +1568,63 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         } else if (has_snapshot &&
                    (!active || g_app.action_status != "正在结束当前统计…")) {
             g_app.action_status.clear();
-            if (!active && g_app.page == ViewPage::Live &&
-                g_app.drill != DrillLevel::Players) {
-                g_app.drill = DrillLevel::Players;
-                g_app.scroll_offset = 0;
+        }
+        if (g_app.page == ViewPage::Live) {
+            std::string encounter_key;
+            std::vector<std::string> player_keys;
+            {
+                std::scoped_lock lock(g_app.snapshot_mutex);
+                if (g_app.snapshot) {
+                    encounter_key = g_app.snapshot->report_id + "/" +
+                        g_app.snapshot->encounter_id;
+                    player_keys.reserve(g_app.snapshot->combat.players.size());
+                    for (const auto& player : g_app.snapshot->combat.players) {
+                        player_keys.push_back(player.identity_key.empty()
+                            ? player.label : player.identity_key);
+                    }
+                }
+            }
+            g_app.navigation.page =
+                nte::combat_stats::overlay::ViewPage::Live;
+            g_app.navigation.drill = static_cast<
+                nte::combat_stats::overlay::DrillLevel>(g_app.drill);
+            g_app.navigation.scroll_offset = g_app.scroll_offset;
+            nte::combat_stats::overlay::ReconcileLiveNavigation(
+                g_app.navigation, encounter_key, player_keys);
+            g_app.drill = static_cast<DrillLevel>(g_app.navigation.drill);
+            g_app.scroll_offset = g_app.navigation.scroll_offset;
+            if (g_app.drill == DrillLevel::Players) {
+                g_app.selected_player = {};
+                g_app.selected_source = {};
             }
         }
         ShowWindow(window, hide ? SW_HIDE : SW_SHOWNOACTIVATE);
+        RenderOverlay();
+        return 0;
+    }
+    case kHistoryRefreshMessage: {
+        bool selected_history_missing = wparam != 0;
+        if (g_app.page == ViewPage::HistoryDetail) {
+            std::scoped_lock lock(g_app.snapshot_mutex);
+            selected_history_missing = selected_history_missing ||
+                (g_app.history_error.empty() &&
+                !g_app.requested_encounter_id.empty() &&
+                std::ranges::none_of(g_app.history, [&](const auto& encounter) {
+                    return encounter.report_id == g_app.requested_report_id &&
+                        encounter.encounter_id == g_app.requested_encounter_id;
+                }));
+        }
+        if (selected_history_missing) {
+            g_app.page = ViewPage::HistoryList;
+            g_app.drill = DrillLevel::Players;
+            g_app.navigation.page =
+                nte::combat_stats::overlay::ViewPage::HistoryList;
+            g_app.navigation.drill =
+                nte::combat_stats::overlay::DrillLevel::Players;
+            g_app.navigation.player_key.clear();
+            g_app.navigation.source_key.clear();
+            g_app.scroll_offset = 0;
+        }
         RenderOverlay();
         return 0;
     }
@@ -1437,7 +1659,15 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         const auto layout = CalculateLayout(static_cast<float>(rect.right - rect.left),
             static_cast<float>(rect.bottom - rect.top), scale,
             g_app.settings.collapsed, players);
-        const HitRegion region = HitTest(layout, x, y, false);
+        const HitRegion base_region = HitTest(layout, x, y, false);
+        std::vector<nte::combat_stats::overlay::ViewRect> controls;
+        controls.reserve(g_app.hit_targets.size());
+        for (const auto& target : g_app.hit_targets) {
+            controls.push_back({target.rect.left, target.rect.top,
+                target.rect.right, target.rect.bottom});
+        }
+        const HitRegion region = nte::combat_stats::overlay::ResolveWindowHit(
+            base_region, x, y, controls);
         switch (region) {
         case HitRegion::Title: return HTCAPTION;
         case HitRegion::ResizeLeft: return HTLEFT;
@@ -1449,9 +1679,6 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         case HitRegion::ResizeBottomLeft: return HTBOTTOMLEFT;
         case HitRegion::ResizeGrip: return HTBOTTOMRIGHT;
         default: break;
-        }
-        for (const auto& target : g_app.hit_targets) {
-            if (Contains(target.rect, x, y)) return HTCLIENT;
         }
         return region == HitRegion::Title ? HTCAPTION : HTCLIENT;
     }
@@ -1722,6 +1949,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(com)) { CloseHandle(mutex); return 1; }
     g_app.instance = instance;
+    std::array<wchar_t, 32768> executable_path{};
+    const DWORD executable_length = GetModuleFileNameW(
+        nullptr, executable_path.data(), static_cast<DWORD>(executable_path.size()));
+    if (executable_length != 0 && executable_length < executable_path.size()) {
+        g_app.name_catalog_path =
+            std::filesystem::path(executable_path.data()).parent_path() /
+                "names" / "zh-CN.json";
+        g_app.name_catalog = nte::combat_stats::NameCatalog::Load(
+            g_app.name_catalog_path,
+            {}, g_app.name_catalog_error);
+    }
     g_app.port = ParsePort();
     const DWORD host_process_id = ParseHostProcessId();
     g_app.taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");

@@ -1,6 +1,7 @@
 #include "combat_stats_engine.hpp"
 #include "damage_cursor.hpp"
 #include "log_worker.hpp"
+#include "name_catalog.hpp"
 #include "overlay_publish_policy.hpp"
 #include "overlay_protocol.hpp"
 #include "overlay_control.hpp"
@@ -112,6 +113,9 @@ struct Context {
     std::string control_status;
     HANDLE manual_end_event{};
     HANDLE plugin_stopping_event{};
+    nte::combat_stats::NameCatalog name_catalog;
+    std::string name_catalog_build;
+    std::string name_catalog_error;
 } g_context;
 
 NteOverlaySnapshot MakeOverlaySnapshot(
@@ -123,6 +127,26 @@ NteOverlaySnapshot MakeOverlaySnapshot(
     std::int64_t utc_ms,
     bool stopping,
     std::uint64_t snapshot_sequence);
+std::optional<std::filesystem::path> PluginDirectory();
+
+void EnsureNameCatalog(const std::string& game_build) {
+    if (g_context.name_catalog_build == game_build &&
+        g_context.name_catalog_error.empty()) return;
+    const auto directory = PluginDirectory();
+    if (!directory) {
+        g_context.name_catalog_error = "插件目录不可用，名称回退到技术路径";
+        g_context.name_catalog = {};
+        return;
+    }
+    g_context.name_catalog = nte::combat_stats::NameCatalog::Load(
+        *directory / "names" / "zh-CN.json", game_build,
+        g_context.name_catalog_error);
+    if (g_context.name_catalog_error.empty()) {
+        g_context.name_catalog_build = game_build;
+    } else {
+        g_context.name_catalog_build.clear();
+    }
+}
 
 bool AppendRange(
     std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges,
@@ -344,8 +368,10 @@ bool OpenEncounterLog(
         session.world = world;
         session.report_started = now;
         session.report_started_utc_ms = utc_ms;
+        const std::string game_build = ResolveBuildId(host);
+        EnsureNameCatalog(game_build);
         if (!g_context.log_worker->Submit(nte::damage_log::ReportOpen{
-                session.report_id, world, utc_ms, ResolveBuildId(host),
+                session.report_id, world, utc_ms, game_build,
                 "0.4.0", ResolveRuntimeVersion(host)})) return false;
     }
     session.encounter_id = nte::damage_log::GenerateUuidV4();
@@ -408,7 +434,7 @@ bool FinishEncounterLog(
     if (session.dropped_events != 0 || !session.service_unavailable_intervals.empty() ||
         session.service_gap_truncated || session.open_missing_sequence_start ||
         session.missing_ranges_truncated) quality.partial = true;
-    if (!g_context.log_worker->Submit(nte::damage_log::EncounterClose{
+    nte::damage_log::EncounterClose close{
         session.encounter_id, reason, utc_ms, closed_offset_us,
         snapshot.outgoing_damage, snapshot.incoming_damage,
         snapshot.encounter_dps, snapshot.duration_seconds, quality,
@@ -416,7 +442,10 @@ bool FinishEncounterLog(
         session.dropped_last_sequence, {}, session.service_unavailable_intervals,
         session.missing_sequence_ranges, session.open_missing_sequence_start,
         session.service_gap_truncated, session.missing_ranges_truncated,
-        snapshot.players})) return false;
+        snapshot.players};
+    close.critical_data_status = snapshot.critical_data_status;
+    close.damage_flag_histogram = snapshot.damage_flag_histogram;
+    if (!g_context.log_worker->Submit(std::move(close))) return false;
     std::string flush_error;
     if (!g_context.log_worker->FlushAndWait(std::chrono::seconds(5), flush_error)) {
         return false;
@@ -902,6 +931,22 @@ void Update(void* context, double) {
                         combat.get(), event.attacker, event.sequence);
                     normalized.victim_name = ResolveParticipantCached(
                         combat.get(), event.victim, event.sequence);
+                    const auto source_display = g_context.name_catalog.DamageSource(
+                        normalized.source_name);
+                    const auto attacker_display = g_context.name_catalog.Character(
+                        normalized.attacker_name);
+                    const auto victim_display = g_context.name_catalog.Character(
+                        normalized.victim_name);
+                    normalized.source_display_name = source_display.display_name;
+                    normalized.source_name_origin = std::string(
+                        nte::combat_stats::NameOriginName(source_display.origin));
+                    normalized.name_catalog_version = source_display.catalog_version;
+                    normalized.attacker_display_name = attacker_display.display_name;
+                    normalized.attacker_name_origin = std::string(
+                        nte::combat_stats::NameOriginName(attacker_display.origin));
+                    normalized.victim_display_name = victim_display.display_name;
+                    normalized.victim_name_origin = std::string(
+                        nte::combat_stats::NameOriginName(victim_display.origin));
                     if (g_context.engine.AcceptDamage(normalized, now) &&
                         g_context.log_worker &&
                         !g_context.log_session.encounter_id.empty() &&
@@ -1099,6 +1144,12 @@ void DrawOverview(const AnomalyUiServiceV1* ui, const RenderState& render) {
             stats.quality.cursor_gap ? "CURSOR_GAP " : "",
             stats.quality.aggregate_truncated ? "AGGREGATE_LIMIT" : "");
     }
+    if (stats.critical_data_status !=
+        nte::combat_stats::CriticalDataStatus::Available) {
+        TextFormat(ui, "暴击数据：%s（Anomaly 当前伤害采集源不提供完整暴击元数据）",
+            nte::combat_stats::CriticalDataStatusName(
+                stats.critical_data_status).data());
+    }
 }
 
 void DrawHistory(const AnomalyUiServiceV1* ui, const RenderState& render) {
@@ -1289,6 +1340,7 @@ AnomalyStatusV1 ANOMALY_CALL Start(void* context) {
         g_context.log_worker.reset();
     }
     ResetState();
+    EnsureNameCatalog("unknown");
     CloseControlHandles();
     g_context.manual_end_event = CreateEventW(nullptr, FALSE, FALSE,
         nte::combat_stats::overlay::kManualEndEventName);

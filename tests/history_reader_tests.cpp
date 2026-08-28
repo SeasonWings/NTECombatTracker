@@ -58,7 +58,12 @@ void ClosedLogsCanBeBrowsedAndDrilledDown() {
         first.basic_damage = 100;
         first.display_damage = 121;
         first.source_name = "SkillA";
+        first.source_display_name = "已记录技能";
+        first.source_name_origin = "catalog";
+        first.name_catalog_version = "fixture-v1";
         first.attacker_name = "/Game/Player/player_C";
+        first.attacker_display_name = "已记录角色";
+        first.attacker_name_origin = "catalog";
         first.victim_name = "/Game/Enemy/enemy_C";
         Check(repository.Append(LoggedDamage{
             first, 1'700'000'001'250, 1'250'000, true}, error),
@@ -88,6 +93,9 @@ void ClosedLogsCanBeBrowsedAndDrilledDown() {
         row.handle = player;
         row.object_path = first.attacker_name;
         row.label = "player_C";
+        row.display_name = "已记录角色";
+        row.name_origin = "catalog";
+        row.name_catalog_version = "fixture-v1";
         row.damage = 200;
         row.positive_hits = 99;
         row.critical_hits = 99;
@@ -113,14 +121,27 @@ void ClosedLogsCanBeBrowsedAndDrilledDown() {
     if (!history.empty()) {
         Check(history[0].encounter_id == encounter_id &&
                   history[0].end_reason == "manual_end" &&
-                  history[0].outgoing_damage == 200,
+                  history[0].outgoing_damage == 200 &&
+                  history[0].game_build == "build",
               "history should expose encounter identity and summary");
+        Check(history[0].critical_data_status ==
+                  nte::combat_stats::CriticalDataStatus::Unavailable,
+              "old encounter summaries default critical quality to unavailable");
     }
     const auto detail = reader.Encounter(report_id, encounter_id, error);
     Check(detail.has_value() && error.empty(), "closed encounter detail should load");
     if (detail) {
+        Check(detail->summary.critical_data_status ==
+                  nte::combat_stats::CriticalDataStatus::Partial,
+              "raw historical events should reveal partial critical metadata");
         Check(detail->players.size() == 1 && detail->players[0].handle == player,
             "report-local actor ids should resolve back to player handles");
+        Check(detail->summary.game_build == "build" &&
+                  detail->players[0].display_name == "已记录角色" &&
+                  detail->players[0].name_origin == "catalog" &&
+                  detail->events[0].source_display_name == "已记录技能" &&
+                  detail->events[0].source_name_origin == "catalog",
+            "history should retain report build and recorded display-name priority metadata");
         Check(detail->players.size() == 1 && detail->players[0].positive_hits == 2 &&
                   detail->players[0].critical_hits == 1,
             "history should recompute hit and critical counts from raw events across generations");
@@ -159,6 +180,10 @@ void ClosedLogsCanBeBrowsedAndDrilledDown() {
         Check(incomplete_players[0].positive_hits == 7 &&
                   incomplete_players[0].critical_hits == 4,
             "incomplete history must retain persisted hit counts instead of using partial events");
+        Check(nte::combat_stats::overlay::CriticalDataStatusForEvents(
+                  {}, incomplete_players, false) ==
+                  nte::combat_stats::CriticalDataStatus::Partial,
+            "an incomplete history remains partial even when its event segments are empty");
     }
 
     std::error_code ignored;

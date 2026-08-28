@@ -15,6 +15,7 @@ enum class DetailDirection : std::uint8_t { Outgoing, Incoming };
 struct HistoricalEncounter {
     std::string report_id;
     std::string encounter_id;
+    std::string game_build;
     std::int64_t started_utc_ms{};
     std::int64_t closed_utc_ms{};
     double duration_seconds{};
@@ -23,6 +24,8 @@ struct HistoricalEncounter {
     double encounter_dps{};
     std::string end_reason;
     bool complete{true};
+    CriticalDataStatus critical_data_status{CriticalDataStatus::Unavailable};
+    std::vector<DamageFlagCount> damage_flag_histogram;
 };
 
 struct CombatEventDetail {
@@ -39,8 +42,17 @@ struct CombatEventDetail {
     std::int64_t received_utc_ms{};
     std::uint64_t received_offset_us{};
     std::string source;
+    std::string source_display_name;
+    std::string source_name_origin;
+    std::string source_catalog_version;
     std::string attacker_name;
+    std::string attacker_display_name;
+    std::string attacker_name_origin;
+    std::string attacker_catalog_version;
     std::string victim_name;
+    std::string victim_display_name;
+    std::string victim_name_origin;
+    std::string victim_catalog_version;
 };
 
 struct DamageSourceSummary {
@@ -93,5 +105,9 @@ void RecomputePlayerHitCounts(
     const std::vector<CombatEventDetail>& events,
     std::vector<PlayerRow>& players,
     bool complete);
+[[nodiscard]] CriticalDataStatus CriticalDataStatusForEvents(
+    const std::vector<CombatEventDetail>& events,
+    const std::vector<PlayerRow>& players,
+    bool complete) noexcept;
 
 }  // namespace nte::combat_stats::overlay

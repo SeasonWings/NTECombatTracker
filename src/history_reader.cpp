@@ -63,10 +63,14 @@ std::optional<std::string> ReadFile(const std::filesystem::path& path) {
     return content.str();
 }
 
-HistoricalEncounter ParseSummary(const Json& value, const std::string& report_id) {
+HistoricalEncounter ParseSummary(
+    const Json& value,
+    const std::string& report_id,
+    const std::string& game_build = {}) {
     HistoricalEncounter result;
     result.report_id = report_id;
     result.encounter_id = value.at("encounter_id").get<std::string>();
+    result.game_build = game_build;
     result.started_utc_ms = value.at("started_utc_ms").get<std::int64_t>();
     result.closed_utc_ms = value.at("closed_utc_ms").get<std::int64_t>();
     result.duration_seconds = value.at("duration_seconds").get<double>();
@@ -75,12 +79,47 @@ HistoricalEncounter ParseSummary(const Json& value, const std::string& report_id
     result.encounter_dps = value.at("encounter_dps").get<double>();
     result.end_reason = value.at("end_reason").get<std::string>();
     result.complete = value.value("complete", false);
+    const std::string critical_status = value.value(
+        "critical_data_status", std::string{"unavailable"});
+    if (critical_status == "available") {
+        result.critical_data_status = CriticalDataStatus::Available;
+    } else if (critical_status == "partial") {
+        result.critical_data_status = CriticalDataStatus::Partial;
+    } else {
+        result.critical_data_status = CriticalDataStatus::Unavailable;
+    }
+    if (const auto histogram = value.find("damage_flag_histogram");
+        histogram != value.end()) {
+        for (const auto& item : *histogram) {
+            result.damage_flag_histogram.push_back({
+                item.at("flags").get<std::uint32_t>(),
+                Decimal<std::uint64_t>(item.at("count"))});
+        }
+    }
     return result;
 }
 
-std::unordered_map<std::uint32_t, std::pair<Handle, std::string>> LoadActors(
+std::string ShortName(const std::string& value);
+
+struct ActorName {
+    Handle handle;
+    std::string technical_name;
+    std::string display_name;
+    std::string name_origin;
+    std::string catalog_version;
+};
+
+struct AbilityName {
+    std::uint64_t source_id{};
+    std::string technical_name;
+    std::string display_name;
+    std::string name_origin;
+    std::string catalog_version;
+};
+
+std::unordered_map<std::uint32_t, ActorName> LoadActors(
     const std::filesystem::path& report) {
-    std::unordered_map<std::uint32_t, std::pair<Handle, std::string>> result;
+    std::unordered_map<std::uint32_t, ActorName> result;
     std::ifstream stream(report / "actors.jsonl", std::ios::binary);
     std::string line;
     while (std::getline(stream, line)) {
@@ -88,25 +127,31 @@ std::unordered_map<std::uint32_t, std::pair<Handle, std::string>> LoadActors(
         const Json value = Json::parse(line);
         const std::uint32_t id = value.at("actor_id").get<std::uint32_t>();
         const auto& handle = value.at("handle");
-        result.emplace(id, std::pair{
+        const std::string technical = value.at("path").get<std::string>();
+        result.emplace(id, ActorName{
             Handle{Decimal<std::uint64_t>(handle.at("id")),
                    Decimal<std::uint64_t>(handle.at("generation"))},
-            value.at("path").get<std::string>()});
+            technical, value.value("display_name", ShortName(technical)),
+            value.value("name_origin", std::string{"technical"}),
+            value.value("catalog_version", std::string{})});
     }
     return result;
 }
 
-std::unordered_map<std::uint32_t, std::pair<std::uint64_t, std::string>> LoadAbilities(
+std::unordered_map<std::uint32_t, AbilityName> LoadAbilities(
     const std::filesystem::path& report) {
-    std::unordered_map<std::uint32_t, std::pair<std::uint64_t, std::string>> result;
+    std::unordered_map<std::uint32_t, AbilityName> result;
     std::ifstream stream(report / "abilities.jsonl", std::ios::binary);
     std::string line;
     while (std::getline(stream, line)) {
         if (line.empty()) continue;
         const Json value = Json::parse(line);
-        result.emplace(value.at("ability_id").get<std::uint32_t>(), std::pair{
+        const std::string technical = value.at("name").get<std::string>();
+        result.emplace(value.at("ability_id").get<std::uint32_t>(), AbilityName{
             Decimal<std::uint64_t>(value.at("source_id")),
-            value.at("name").get<std::string>()});
+            technical, value.value("display_name", ShortName(technical)),
+            value.value("name_origin", std::string{"technical"}),
+            value.value("catalog_version", std::string{})});
     }
     return result;
 }
@@ -130,8 +175,21 @@ CombatEventDetail ParseEvent(const Json& value) {
     result.received_utc_ms = value.at("received_utc_ms").get<std::int64_t>();
     result.received_offset_us = Decimal<std::uint64_t>(value.at("received_offset_us"));
     result.source = value.at("source_name").get<std::string>();
+    result.source_display_name = value.value("source_display_name", ShortName(result.source));
+    result.source_name_origin = value.value("source_name_origin", std::string{"technical"});
+    result.source_catalog_version = value.value("name_catalog_version", std::string{});
     result.attacker_name = value.value("attacker_name", std::string{});
+    result.attacker_display_name = value.value(
+        "attacker_display_name", ShortName(result.attacker_name));
+    result.attacker_name_origin = value.value(
+        "attacker_name_origin", std::string{"technical"});
+    result.attacker_catalog_version = value.value("name_catalog_version", std::string{});
     result.victim_name = value.value("victim_name", std::string{});
+    result.victim_display_name = value.value(
+        "victim_display_name", ShortName(result.victim_name));
+    result.victim_name_origin = value.value(
+        "victim_name_origin", std::string{"technical"});
+    result.victim_catalog_version = value.value("name_catalog_version", std::string{});
     return result;
 }
 
@@ -160,13 +218,23 @@ std::vector<HistoricalEncounter> CombatLogReader::History(std::string& error) co
         for (const auto& report : catalog.at("reports")) {
             const std::string report_id = report.at("report_id").get<std::string>();
             if (!IsUuid(report_id)) continue;
+            std::string game_build;
+            if (const auto report_text = ReadFile(
+                    root_ / "reports" / report_id / "report.json")) {
+                try {
+                    game_build = Json::parse(*report_text).value(
+                        "game_build", std::string{});
+                } catch (const std::exception& exception) {
+                    error = exception.what();
+                }
+            }
             std::ifstream encounters(root_ / "reports" / report_id / "encounters.jsonl",
                 std::ios::binary);
             std::string line;
             while (std::getline(encounters, line)) {
                 if (line.empty()) continue;
                 try {
-                    auto summary = ParseSummary(Json::parse(line), report_id);
+                    auto summary = ParseSummary(Json::parse(line), report_id, game_build);
                     if (IsUuid(summary.encounter_id)) result.push_back(std::move(summary));
                 } catch (const std::exception& exception) {
                     error = exception.what();
@@ -198,10 +266,16 @@ std::vector<CombatEventDetail> CombatLogReader::Events(
     try {
         const auto directory = root_ / "reports" / report_id;
         const auto actors = LoadActors(directory);
-        std::unordered_map<Handle, std::string, HandleHash> actor_names;
+        const auto abilities = LoadAbilities(directory);
+        std::unordered_map<Handle, ActorName, HandleHash> actor_names;
         for (const auto& [id, actor] : actors) {
             static_cast<void>(id);
-            actor_names.insert_or_assign(actor.first, actor.second);
+            actor_names.insert_or_assign(actor.handle, actor);
+        }
+        std::unordered_map<std::uint64_t, AbilityName> ability_names;
+        for (const auto& [id, ability] : abilities) {
+            static_cast<void>(id);
+            ability_names.insert_or_assign(ability.source_id, ability);
         }
         std::error_code filesystem_error;
         std::vector<std::filesystem::path> segments;
@@ -222,9 +296,34 @@ std::vector<CombatEventDetail> CombatLogReader::Events(
                     auto event = ParseEvent(Json::parse(line));
                     if (event.encounter_id == encounter_id) {
                         if (const auto attacker = actor_names.find(event.attacker);
-                            attacker != actor_names.end()) event.attacker_name = attacker->second;
+                            attacker != actor_names.end()) {
+                            event.attacker_name = attacker->second.technical_name;
+                            if (event.attacker_name_origin == "technical" &&
+                                attacker->second.name_origin != "technical") {
+                                event.attacker_display_name = attacker->second.display_name;
+                                event.attacker_name_origin = attacker->second.name_origin;
+                                event.attacker_catalog_version =
+                                    attacker->second.catalog_version;
+                            }
+                        }
                         if (const auto victim = actor_names.find(event.victim);
-                            victim != actor_names.end()) event.victim_name = victim->second;
+                            victim != actor_names.end()) {
+                            event.victim_name = victim->second.technical_name;
+                            if (event.victim_name_origin == "technical" &&
+                                victim->second.name_origin != "technical") {
+                                event.victim_display_name = victim->second.display_name;
+                                event.victim_name_origin = victim->second.name_origin;
+                                event.victim_catalog_version = victim->second.catalog_version;
+                            }
+                        }
+                        if (const auto source = ability_names.find(event.source_id);
+                            source != ability_names.end() &&
+                            event.source_name_origin == "technical" &&
+                            source->second.name_origin != "technical") {
+                            event.source_display_name = source->second.display_name;
+                            event.source_name_origin = source->second.name_origin;
+                            event.source_catalog_version = source->second.catalog_version;
+                        }
                         result.push_back(std::move(event));
                     }
                 } catch (const std::exception& exception) {
@@ -269,7 +368,11 @@ std::optional<EncounterDetail> CombatLogReader::Encounter(
             return std::nullopt;
         }
         EncounterDetail detail;
-        detail.summary = ParseSummary(selected, report_id);
+        std::string game_build;
+        if (const auto report_text = ReadFile(directory / "report.json")) {
+            game_build = Json::parse(*report_text).value("game_build", std::string{});
+        }
+        detail.summary = ParseSummary(selected, report_id, game_build);
         const auto actors = LoadActors(directory);
         const auto abilities = LoadAbilities(directory);
         std::unordered_map<std::uint32_t, std::size_t> player_indices;
@@ -277,11 +380,20 @@ std::optional<EncounterDetail> CombatLogReader::Encounter(
             PlayerRow player;
             const auto actor_id = item.at("actor_id").get<std::uint32_t>();
             if (const auto actor = actors.find(actor_id); actor != actors.end()) {
-                player.handle = actor->second.first;
-                player.object_path = actor->second.second;
+                player.handle = actor->second.handle;
+                player.object_path = actor->second.technical_name;
+                player.display_name = actor->second.display_name;
+                player.name_origin = actor->second.name_origin;
+                player.name_catalog_version = actor->second.catalog_version;
             }
             player.identity_key = "path:" + player.object_path;
-            player.label = item.value("label", ShortName(player.object_path));
+            player.label = item.value("label", player.display_name.empty()
+                ? ShortName(player.object_path) : player.display_name);
+            if (player.display_name.empty()) player.display_name = player.label;
+            player.name_origin = item.value("name_origin", player.name_origin.empty()
+                ? std::string{"recorded"} : player.name_origin);
+            player.name_catalog_version = item.value(
+                "name_catalog_version", player.name_catalog_version);
             player.damage = Decimal<std::int64_t>(item.at("damage"));
             player.positive_hits = Decimal<std::uint64_t>(item.at("positive_hits"));
             player.critical_hits = Decimal<std::uint64_t>(item.at("critical_hits"));
@@ -294,8 +406,12 @@ std::optional<EncounterDetail> CombatLogReader::Encounter(
             player.maximum_hit = Decimal<std::int64_t>(item.at("maximum_hit"));
             const auto ability_id = item.at("maximum_ability_id").get<std::uint32_t>();
             if (const auto ability = abilities.find(ability_id); ability != abilities.end()) {
-                player.maximum_source_id = ability->second.first;
-                player.maximum_source_name = ability->second.second;
+                player.maximum_source_id = ability->second.source_id;
+                player.maximum_source_name = ability->second.technical_name;
+                player.maximum_source_display_name = ability->second.display_name;
+                player.maximum_source_name_origin = ability->second.name_origin;
+                player.maximum_source_catalog_version =
+                    ability->second.catalog_version;
             }
             player_indices.emplace(actor_id, detail.players.size());
             detail.players.push_back(std::move(player));
@@ -319,6 +435,10 @@ std::optional<EncounterDetail> CombatLogReader::Encounter(
         if (error.empty() && !detail.events.empty()) {
             CanonicalizePlayerEvents(detail.events, detail.players);
         }
+        if (error.empty()) {
+            detail.summary.critical_data_status = CriticalDataStatusForEvents(
+                detail.events, detail.players, detail.summary.complete);
+        }
         if (error.empty()) RecomputePlayerHitCounts(
             detail.events, detail.players, detail.summary.complete);
         return detail;
@@ -326,6 +446,30 @@ std::optional<EncounterDetail> CombatLogReader::Encounter(
         error = exception.what();
         return std::nullopt;
     }
+}
+
+CriticalDataStatus CriticalDataStatusForEvents(
+    const std::vector<CombatEventDetail>& events,
+    const std::vector<PlayerRow>& players,
+    const bool complete) noexcept {
+    std::uint64_t positive_hits{};
+    std::uint64_t metadata_hits{};
+    std::uint64_t explicit_critical_hits{};
+    for (const auto& event : events) {
+        if (!IsPositiveDamage(event.final_damage)) continue;
+        const bool outgoing = std::ranges::any_of(players, [&](const PlayerRow& player) {
+            return event.attacker == player.handle;
+        });
+        if (!outgoing) continue;
+        ++positive_hits;
+        if ((event.flags & kDamageFlagClientPresented) != 0) ++metadata_hits;
+        if ((event.flags & kDamageFlagCritical) != 0) ++explicit_critical_hits;
+    }
+    if (!complete) return CriticalDataStatus::Partial;
+    if (metadata_hits != 0 || explicit_critical_hits != 0) {
+        return CriticalDataStatus::Partial;
+    }
+    return CriticalDataStatus::Unavailable;
 }
 
 void CanonicalizePlayerEvents(
@@ -388,8 +532,12 @@ std::vector<DamageSourceSummary> GroupDamageSources(
         row.participant = participant;
         row.source_name = event.source;
         row.label = direction == DetailDirection::Incoming
-            ? ShortName(event.attacker_name) + " / " + ShortName(event.source)
-            : ShortName(event.source);
+            ? (event.attacker_display_name.empty()
+                ? ShortName(event.attacker_name) : event.attacker_display_name) + " / " +
+              (event.source_display_name.empty()
+                ? ShortName(event.source) : event.source_display_name)
+            : (event.source_display_name.empty()
+                ? ShortName(event.source) : event.source_display_name);
         row.damage += event.final_damage;
         ++row.hits;
         row.maximum_hit = (std::max)(row.maximum_hit, event.final_damage);

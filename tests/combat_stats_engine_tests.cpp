@@ -385,6 +385,11 @@ void CriticalRateCountsOnlyPositiveOutgoingHits() {
     engine.AcceptDamage(negative_critical, start + 4s);
 
     const auto snapshot = engine.BuildSnapshot(start + 4s);
+    Check(snapshot.critical_data_status ==
+              nte::combat_stats::CriticalDataStatus::Partial,
+        "isolated critical flags without metadata validity must be marked partial");
+    Check(snapshot.damage_flag_histogram.size() == 2,
+        "encounter snapshots retain the raw damage flag distribution");
     Check(snapshot.players.size() == 1, "rotated character should remain one row");
     if (!snapshot.players.empty()) {
         const auto& row = snapshot.players.front();
@@ -393,6 +398,40 @@ void CriticalRateCountsOnlyPositiveOutgoingHits() {
         Check(std::abs(nte::combat_stats::PlayerCriticalRate(row) - 100.0 / 3.0) < 0.001,
             "one critical among three positive hits should be 33.33 percent");
     }
+}
+
+void CharacterDamageWithoutPresentedMetadataMarksCriticalDataUnavailable() {
+    CombatStatsEngine engine;
+    const TimePoint start{350s};
+    const Handle world{62, 1};
+    const Handle player{63, 1};
+    engine.ObserveCombatant(
+        Combatant{world, player, 100.0, 100.0, 0.0}, start);
+    auto first = Outgoing(1, world, player, 100);
+    first.flags = 1U << 4U;
+    engine.AcceptDamage(first, start);
+    auto second = Outgoing(2, world, player, 80);
+    second.flags = 1U << 4U;
+    engine.AcceptDamage(second, start + 1s);
+
+    const auto unavailable = engine.BuildSnapshot(start + 1s);
+    Check(unavailable.critical_data_status ==
+              nte::combat_stats::CriticalDataStatus::Unavailable,
+        "character-only events expose no critical metadata");
+    Check(unavailable.players.front().critical_hits == 0,
+        "unavailable critical metadata retains the requested zero-percent display value");
+
+    engine.Reset();
+    engine.ObserveCombatant(
+        Combatant{world, player, 100.0, 100.0, 0.0}, start + 2s);
+    first.flags = nte::combat_stats::kDamageFlagClientPresented |
+        nte::combat_stats::kDamageFlagCritical;
+    second.flags = nte::combat_stats::kDamageFlagClientPresented;
+    engine.AcceptDamage(first, start + 2s);
+    engine.AcceptDamage(second, start + 3s);
+    Check(engine.BuildSnapshot(start + 3s).critical_data_status ==
+              nte::combat_stats::CriticalDataStatus::Partial,
+        "presentation bits cannot prove critical metadata is complete without an SDK capability");
 }
 
 void EncounterAndRollingDps() {
@@ -608,6 +647,7 @@ int main() {
     BothControlledParticipantsStoreOneVisibleEvent();
     DirectionAndNonPositiveRules();
     CriticalRateCountsOnlyPositiveOutgoingHits();
+    CharacterDamageWithoutPresentedMetadataMarksCriticalDataUnavailable();
     EncounterAndRollingDps();
     EncounterDpsUsesPlayerActivityWindow();
     AggregatesAndQualityFlags();

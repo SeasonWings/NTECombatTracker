@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -26,6 +27,17 @@ struct HandleHash {
 };
 
 enum class EncounterState { Idle, Active, Completed };
+enum class CriticalDataStatus : std::uint8_t { Unavailable, Available, Partial };
+
+[[nodiscard]] inline std::string_view CriticalDataStatusName(
+    const CriticalDataStatus status) noexcept {
+    switch (status) {
+    case CriticalDataStatus::Available: return "available";
+    case CriticalDataStatus::Partial: return "partial";
+    case CriticalDataStatus::Unavailable: return "unavailable";
+    }
+    return "unavailable";
+}
 
 struct Combatant {
     Handle world;
@@ -54,8 +66,15 @@ struct DamageEvent {
     std::int64_t received_utc_ms{};
     std::uint64_t received_offset_us{};
     std::string source_name;
+    std::string source_display_name;
+    std::string source_name_origin;
+    std::string name_catalog_version;
     std::string attacker_name;
+    std::string attacker_display_name;
+    std::string attacker_name_origin;
     std::string victim_name;
+    std::string victim_display_name;
+    std::string victim_name_origin;
 };
 
 inline constexpr std::uint32_t kDamageFlagClientPresented = 1U << 0U;
@@ -93,6 +112,9 @@ struct PlayerRow {
     Handle handle;
     std::string object_path;
     std::string label;
+    std::string display_name;
+    std::string name_origin;
+    std::string name_catalog_version;
     std::int64_t damage{};
     std::uint64_t positive_hits{};
     std::uint64_t critical_hits{};
@@ -101,6 +123,9 @@ struct PlayerRow {
     std::int64_t maximum_hit{};
     std::uint64_t maximum_source_id{};
     std::string maximum_source_name;
+    std::string maximum_source_display_name;
+    std::string maximum_source_name_origin;
+    std::string maximum_source_catalog_version;
     double damage_share{};
     double encounter_dps{};
     double active_dps{};
@@ -150,8 +175,11 @@ struct RecentEvent {
     std::int64_t received_utc_ms{};
     std::uint64_t received_offset_us{};
     std::string source;
+    std::string source_display_name;
     std::string attacker;
+    std::string attacker_display_name;
     std::string victim;
+    std::string victim_display_name;
 };
 
 struct Quality {
@@ -159,6 +187,11 @@ struct Quality {
     bool overflow{};
     bool cursor_gap{};
     bool aggregate_truncated{};
+};
+
+struct DamageFlagCount {
+    std::uint32_t flags{};
+    std::uint64_t count{};
 };
 
 struct TimedDamage {
@@ -192,6 +225,8 @@ struct Snapshot {
     double max_hp{};
     double shield{};
     Quality quality;
+    CriticalDataStatus critical_data_status{CriticalDataStatus::Unavailable};
+    std::vector<DamageFlagCount> damage_flag_histogram;
     std::vector<AggregateRow> outgoing_sources;
     std::vector<AggregateRow> outgoing_targets;
     std::vector<AggregateRow> incoming_sources;
@@ -216,6 +251,9 @@ private:
         Handle handle;
         std::string object_path;
         std::string label;
+        std::string display_name;
+        std::string name_origin;
+        std::string name_catalog_version;
         std::int64_t damage{};
         std::uint64_t positive_hits{};
         std::uint64_t critical_hits{};
@@ -224,6 +262,9 @@ private:
         std::int64_t maximum_hit{};
         std::uint64_t maximum_source_id{};
         std::string maximum_source_name;
+        std::string maximum_source_display_name;
+        std::string maximum_source_name_origin;
+        std::string maximum_source_catalog_version;
         TimePoint first_positive_damage{};
         TimePoint last_positive_damage{};
         std::vector<TimedDamage> rolling_damage;
@@ -232,7 +273,12 @@ private:
         std::int64_t maximum_incoming_hit{};
     };
 
-    PlayerAggregate& ConfirmControlledActor(Handle handle, const std::string& object_path);
+    PlayerAggregate& ConfirmControlledActor(
+        Handle handle,
+        const std::string& object_path,
+        const std::string& display_name,
+        const std::string& name_origin,
+        const std::string& catalog_version);
     void ClearEncounter();
 
     EncounterState state_{EncounterState::Idle};
@@ -247,8 +293,10 @@ private:
     std::uint64_t outgoing_positive_hits_{};
     std::uint64_t incoming_positive_hits_{};
     std::uint64_t non_positive_events_{};
+    std::uint64_t critical_metadata_positive_hits_{};
     std::int64_t maximum_outgoing_hit_{};
     std::vector<RecentEvent> recent_events_;
+    std::unordered_map<std::uint32_t, std::uint64_t> damage_flag_histogram_;
     std::vector<TimedDamage> rolling_outgoing_;
     std::unordered_map<std::uint64_t, AggregateRow> outgoing_sources_;
     std::unordered_map<Handle, AggregateRow, HandleHash> outgoing_targets_;

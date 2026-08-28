@@ -92,12 +92,76 @@ function Reset-BuildDirectory {
     New-Item -ItemType Directory -Path $actual -Force | Out-Null
 }
 
+function Test-NameCatalog {
+    param([Parameter(Mandatory)] [string]$Path)
+
+    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    try {
+        $content = $strictUtf8.GetString([System.IO.File]::ReadAllBytes($Path))
+    } catch {
+        throw "Name catalog must be valid UTF-8: $Path"
+    }
+    $jsonDocument = [System.Text.Json.JsonDocument]::Parse($content)
+    function Assert-UniqueJsonProperties {
+        param(
+            [Parameter(Mandatory)] [System.Text.Json.JsonElement]$Element,
+            [Parameter(Mandatory)] [string]$JsonPath
+        )
+        if ($Element.ValueKind -eq [System.Text.Json.JsonValueKind]::Object) {
+            $seen = [System.Collections.Generic.HashSet[string]]::new(
+                [System.StringComparer]::Ordinal)
+            foreach ($property in $Element.EnumerateObject()) {
+                if (-not $seen.Add($property.Name)) {
+                    throw "Duplicate name catalog key '$($property.Name)' at '$JsonPath'."
+                }
+                Assert-UniqueJsonProperties -Element $property.Value `
+                    -JsonPath "$JsonPath.$($property.Name)"
+            }
+        } elseif ($Element.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+            $index = 0
+            foreach ($item in $Element.EnumerateArray()) {
+                Assert-UniqueJsonProperties -Element $item -JsonPath "$JsonPath[$index]"
+                ++$index
+            }
+        }
+    }
+    try {
+        Assert-UniqueJsonProperties -Element $jsonDocument.RootElement -JsonPath '$'
+    } finally {
+        $jsonDocument.Dispose()
+    }
+    $catalog = $content | ConvertFrom-Json -AsHashtable
+    if ($catalog.schemaVersion -ne 1 -or $catalog.locale -ne 'zh-CN' -or
+        [string]::IsNullOrWhiteSpace($catalog.catalogVersion)) {
+        throw 'Name catalog schemaVersion, locale, or catalogVersion is invalid.'
+    }
+    if ($null -eq $catalog.builds -or -not $catalog.builds.Contains('default')) {
+        throw 'Name catalog must contain a default build group.'
+    }
+    foreach ($build in $catalog.builds.GetEnumerator()) {
+        foreach ($categoryName in @('characters', 'damageSources')) {
+            $category = $build.Value[$categoryName]
+            if ($null -eq $category) {
+                throw "Name catalog build '$($build.Key)' lacks '$categoryName'."
+            }
+            foreach ($entry in $category.GetEnumerator()) {
+                if (-not $entry.Key.StartsWith('/') -or
+                    [string]::IsNullOrWhiteSpace([string]$entry.Value)) {
+                    throw "Invalid name catalog entry '$($entry.Key)' in '$categoryName'."
+                }
+            }
+        }
+    }
+}
+
 $visualStudioCMake = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
 $cmake = Resolve-Executable -Name 'cmake' -FallbackPath $visualStudioCMake
 $ctest = Join-Path (Split-Path -Parent $cmake) 'ctest.exe'
 if (-not (Test-Path -LiteralPath $ctest -PathType Leaf)) {
     $ctest = Resolve-Executable -Name 'ctest'
 }
+
+Test-NameCatalog -Path (Join-Path $repositoryRoot 'names\zh-CN.json')
 
 if ($Incremental) {
     New-Item -ItemType Directory -Path $buildDirectory -Force | Out-Null

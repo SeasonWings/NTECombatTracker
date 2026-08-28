@@ -57,6 +57,9 @@ struct EncounterClose {
     bool service_intervals_truncated{};
     bool missing_ranges_truncated{};
     std::vector<combat_stats::PlayerRow> confirmed_controlled_players;
+    combat_stats::CriticalDataStatus critical_data_status{
+        combat_stats::CriticalDataStatus::Unavailable};
+    std::vector<combat_stats::DamageFlagCount> damage_flag_histogram;
 };
 
 struct ReportClose {

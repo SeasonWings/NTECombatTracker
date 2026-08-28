@@ -47,11 +47,16 @@ NteOverlaySnapshot ExampleSnapshot() {
     message.combat.max_hp = 100.0;
     message.combat.shield = 9.0;
     message.combat.quality.partial = true;
+    message.combat.critical_data_status = nte::combat_stats::CriticalDataStatus::Partial;
+    message.combat.damage_flag_histogram = {{0, 1}, {16, 2}};
     nte::combat_stats::PlayerRow player;
     player.identity_key = "path:/Game/角色/player_001_C";
     player.handle = {std::numeric_limits<std::uint64_t>::max(), 7};
     player.object_path = "/Game/角色/player_001_C";
     player.label = "角色甲";
+    player.display_name = "角色甲";
+    player.name_origin = "catalog";
+    player.name_catalog_version = "2026.08.28";
     player.damage = 700;
     player.positive_hits = 2;
     player.critical_hits = 1;
@@ -60,6 +65,7 @@ NteOverlaySnapshot ExampleSnapshot() {
     player.maximum_hit = 500;
     player.maximum_source_id = std::numeric_limits<std::uint64_t>::max() - 2;
     player.maximum_source_name = "终结技\"A\"";
+    player.maximum_source_display_name = "终结技甲";
     player.damage_share = 70.0;
     player.encounter_dps = 56.0;
     player.active_dps = 70.0;
@@ -81,7 +87,9 @@ NteOverlaySnapshot ExampleSnapshot() {
     event.received_utc_ms = message.sent_utc_ms;
     event.received_offset_us = 2'500'000;
     event.source = "Skill";
+    event.source_display_name = "技能甲";
     event.attacker = "Player";
+    event.attacker_display_name = "角色甲";
     event.victim = "Enemy";
     message.combat.recent_events.push_back(std::move(event));
     message.combat.controlled_character_count = 1;
@@ -102,6 +110,10 @@ void RoundTripPreservesVersionedNteSnapshot() {
           "uint64 snapshot sequence must retain decimal precision");
     Check(parsed->combat.outgoing_damage == expected.combat.outgoing_damage,
           "int64 damage must retain decimal precision");
+    Check(parsed->combat.critical_data_status ==
+              nte::combat_stats::CriticalDataStatus::Partial &&
+              parsed->combat.damage_flag_histogram.size() == 2,
+          "critical data quality and raw flag histogram should round-trip");
     Check(parsed->primary_target == expected.primary_target,
           "Unicode target names must round-trip");
     Check(parsed->control_status == "manual_end_completed",
@@ -114,6 +126,10 @@ void RoundTripPreservesVersionedNteSnapshot() {
               "generation handle ids must retain precision");
         Check(player.maximum_source_name == "终结技\"A\"",
               "ability names must use correct JSON escaping");
+        Check(player.display_name == "角色甲" &&
+                  player.maximum_source_display_name == "终结技甲" &&
+                  player.name_origin == "catalog",
+              "optional localized player and source names should round-trip");
         Check(player.incoming_damage == 45 && player.incoming_positive_hits == 3 &&
                   player.maximum_incoming_hit == 20 && player.incoming_share == 100.0,
               "optional incoming player metrics should round-trip");
@@ -122,7 +138,8 @@ void RoundTripPreservesVersionedNteSnapshot() {
               parsed->combat.recent_events[0].source_id ==
                   std::numeric_limits<std::uint64_t>::max() - 3 &&
               parsed->combat.recent_events[0].attacker_handle ==
-                  nte::combat_stats::Handle{91, 2},
+                  nte::combat_stats::Handle{91, 2} &&
+              parsed->combat.recent_events[0].source_display_name == "技能甲",
           "recent event identifiers should round-trip");
 }
 

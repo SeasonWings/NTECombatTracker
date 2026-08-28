@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -145,6 +146,18 @@ enum class HitRegion : std::uint8_t {
     ResizeGrip,
 };
 
+enum class ViewPage : std::uint8_t { Live, HistoryList, HistoryDetail };
+enum class DrillLevel : std::uint8_t { Players, Sources, Events };
+
+struct NavigationState {
+    ViewPage page{ViewPage::Live};
+    DrillLevel drill{DrillLevel::Players};
+    std::string encounter_key;
+    std::string player_key;
+    std::string source_key;
+    std::size_t scroll_offset{};
+};
+
 [[nodiscard]] std::vector<PlayerRow> SortPlayers(
     const std::vector<PlayerRow>& players,
     SortColumn column,
@@ -170,6 +183,16 @@ enum class HitRegion : std::uint8_t {
     float x,
     float y,
     bool locked) noexcept;
+[[nodiscard]] HitRegion ResolveWindowHit(
+    HitRegion base_region,
+    float x,
+    float y,
+    std::span<const ViewRect> interactive_rects) noexcept;
+void ReconcileLiveNavigation(
+    NavigationState& state,
+    std::string_view encounter_key,
+    std::span<const std::string> player_keys = {},
+    std::span<const std::string> source_keys = {}) noexcept;
 [[nodiscard]] ReferenceTheme OverlayReferenceTheme() noexcept;
 [[nodiscard]] ReferenceMetrics OverlayReferenceMetrics() noexcept;
 [[nodiscard]] OverlayTextStyles OverlayReferenceTextStyles() noexcept;

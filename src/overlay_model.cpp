@@ -292,4 +292,63 @@ HitRegion HitTest(
     return HitRegion::Client;
 }
 
+HitRegion ResolveWindowHit(
+    const HitRegion base_region,
+    const float x,
+    const float y,
+    const std::span<const ViewRect> interactive_rects) noexcept {
+    switch (base_region) {
+    case HitRegion::ResizeLeft:
+    case HitRegion::ResizeRight:
+    case HitRegion::ResizeTop:
+    case HitRegion::ResizeBottom:
+    case HitRegion::ResizeTopLeft:
+    case HitRegion::ResizeTopRight:
+    case HitRegion::ResizeBottomLeft:
+    case HitRegion::ResizeGrip:
+        return base_region;
+    default:
+        break;
+    }
+    if (base_region == HitRegion::Title) {
+        for (const auto& rect : interactive_rects) {
+            if (x >= rect.left && x <= rect.right &&
+                y >= rect.top && y <= rect.bottom) {
+                return HitRegion::Client;
+            }
+        }
+    }
+    return base_region;
+}
+
+void ReconcileLiveNavigation(
+    NavigationState& state,
+    const std::string_view encounter_key,
+    const std::span<const std::string> player_keys,
+    const std::span<const std::string> source_keys) noexcept {
+    if (state.page != ViewPage::Live) return;
+    if (state.encounter_key != encounter_key) {
+        state.encounter_key.assign(encounter_key);
+        state.drill = DrillLevel::Players;
+        state.player_key.clear();
+        state.source_key.clear();
+        state.scroll_offset = 0;
+        return;
+    }
+    if (state.drill != DrillLevel::Players && !player_keys.empty() &&
+        std::ranges::find(player_keys, state.player_key) == player_keys.end()) {
+        state.drill = DrillLevel::Players;
+        state.player_key.clear();
+        state.source_key.clear();
+        state.scroll_offset = 0;
+        return;
+    }
+    if (state.drill == DrillLevel::Events && !source_keys.empty() &&
+        std::ranges::find(source_keys, state.source_key) == source_keys.end()) {
+        state.drill = DrillLevel::Sources;
+        state.source_key.clear();
+        state.scroll_offset = 0;
+    }
+}
+
 }  // namespace nte::combat_stats::overlay

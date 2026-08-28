@@ -63,6 +63,13 @@ EncounterState ParseState(const std::string& state) {
     throw std::runtime_error("encounter.state is invalid");
 }
 
+CriticalDataStatus ParseCriticalDataStatus(const std::string& status) {
+    if (status == "available") return CriticalDataStatus::Available;
+    if (status == "partial") return CriticalDataStatus::Partial;
+    if (status == "unavailable") return CriticalDataStatus::Unavailable;
+    throw std::runtime_error("quality.critical_data_status is invalid");
+}
+
 void ValidateRate(const Json& value, const double expected, const char* field) {
     const double actual = value.get<double>();
     if (!std::isfinite(actual) || std::abs(actual - expected) > 0.000001) {
@@ -77,6 +84,9 @@ Json PlayerToJson(const PlayerRow& row) {
                     {"generation", Decimal(row.handle.generation)}}},
         {"object_path", row.object_path},
         {"label", row.label},
+        {"display_name", row.display_name},
+        {"name_origin", row.name_origin},
+        {"name_catalog_version", row.name_catalog_version},
         {"damage", Decimal(row.damage)},
         {"positive_hits", Decimal(row.positive_hits)},
         {"critical_hits", Decimal(row.critical_hits)},
@@ -87,7 +97,10 @@ Json PlayerToJson(const PlayerRow& row) {
         {"weak_rate", PlayerWeakRate(row)},
         {"maximum_hit", Decimal(row.maximum_hit)},
         {"maximum_ability", {{"source_id", Decimal(row.maximum_source_id)},
-                             {"name", row.maximum_source_name}}},
+                             {"name", row.maximum_source_name},
+                             {"display_name", row.maximum_source_display_name},
+                             {"name_origin", row.maximum_source_name_origin},
+                             {"catalog_version", row.maximum_source_catalog_version}}},
         {"damage_share", row.damage_share},
         {"encounter_dps", row.encounter_dps},
         {"active_dps", row.active_dps},
@@ -108,6 +121,10 @@ PlayerRow PlayerFromJson(const Json& value) {
         handle.at("generation"), "players.handle.generation");
     row.object_path = value.at("object_path").get<std::string>();
     row.label = value.at("label").get<std::string>();
+    row.display_name = value.value("display_name", row.label);
+    row.name_origin = value.value("name_origin", std::string{"technical"});
+    row.name_catalog_version = value.value(
+        "name_catalog_version", std::string{});
     row.damage = ParseDecimal<std::int64_t>(value.at("damage"), "players.damage");
     row.positive_hits = ParseDecimal<std::uint64_t>(
         value.at("positive_hits"), "players.positive_hits");
@@ -133,6 +150,12 @@ PlayerRow PlayerFromJson(const Json& value) {
     row.maximum_source_id = ParseDecimal<std::uint64_t>(
         ability.at("source_id"), "players.maximum_ability.source_id");
     row.maximum_source_name = ability.at("name").get<std::string>();
+    row.maximum_source_display_name = ability.value(
+        "display_name", row.maximum_source_name);
+    row.maximum_source_name_origin = ability.value(
+        "name_origin", std::string{"technical"});
+    row.maximum_source_catalog_version = ability.value(
+        "catalog_version", std::string{});
     row.damage_share = value.at("damage_share").get<double>();
     row.encounter_dps = value.at("encounter_dps").get<double>();
     row.active_dps = value.at("active_dps").get<double>();
@@ -165,7 +188,12 @@ Json RecentEventToJson(const RecentEvent& event) {
         {"basic_damage", Decimal(event.basic_damage)},
         {"received_utc_ms", Decimal(event.received_utc_ms)},
         {"received_offset_us", Decimal(event.received_offset_us)},
-        {"source", event.source}, {"attacker", event.attacker}, {"victim", event.victim}};
+        {"source", event.source},
+        {"source_display_name", event.source_display_name},
+        {"attacker", event.attacker},
+        {"attacker_display_name", event.attacker_display_name},
+        {"victim", event.victim},
+        {"victim_display_name", event.victim_display_name}};
 }
 
 RecentEvent RecentEventFromJson(const Json& value) {
@@ -198,8 +226,11 @@ RecentEvent RecentEventFromJson(const Json& value) {
     event.received_offset_us = ParseDecimal<std::uint64_t>(value.at("received_offset_us"),
         "recent_events.received_offset_us");
     event.source = value.at("source").get<std::string>();
+    event.source_display_name = value.value("source_display_name", event.source);
     event.attacker = value.at("attacker").get<std::string>();
+    event.attacker_display_name = value.value("attacker_display_name", event.attacker);
     event.victim = value.at("victim").get<std::string>();
+    event.victim_display_name = value.value("victim_display_name", event.victim);
     return event;
 }
 
@@ -232,6 +263,11 @@ std::string SerializeOverlaySnapshot(const NteOverlaySnapshot& snapshot) {
         ? snapshot.combat.recent_events.size() - kMaximumRecentEvents : 0;
     for (std::size_t index = first; index < snapshot.combat.recent_events.size(); ++index) {
         recent_events.push_back(RecentEventToJson(snapshot.combat.recent_events[index]));
+    }
+    Json damage_flag_histogram = Json::array();
+    for (const auto& item : snapshot.combat.damage_flag_histogram) {
+        damage_flag_histogram.push_back({
+            {"flags", item.flags}, {"count", Decimal(item.count)}});
     }
     Json document{
         {"channel", kOverlayChannel},
@@ -268,7 +304,10 @@ std::string SerializeOverlaySnapshot(const NteOverlaySnapshot& snapshot) {
         {"quality", {{"partial", snapshot.combat.quality.partial},
                      {"overflow", snapshot.combat.quality.overflow},
                      {"cursor_gap", snapshot.combat.quality.cursor_gap},
-                     {"aggregate_limit", snapshot.combat.quality.aggregate_truncated}}},
+                     {"aggregate_limit", snapshot.combat.quality.aggregate_truncated},
+                     {"critical_data_status",
+                      CriticalDataStatusName(snapshot.combat.critical_data_status)},
+                     {"damage_flag_histogram", std::move(damage_flag_histogram)}}},
         {"transport", {{"port", snapshot.websocket_port},
                        {"connected_clients", snapshot.connected_clients},
                        {"published_messages", Decimal(snapshot.published_messages)},
@@ -363,6 +402,20 @@ std::optional<NteOverlaySnapshot> ParseOverlaySnapshot(
         result.combat.quality.cursor_gap = quality.at("cursor_gap").get<bool>();
         result.combat.quality.aggregate_truncated =
             quality.at("aggregate_limit").get<bool>();
+        if (const auto status = quality.find("critical_data_status");
+            status != quality.end()) {
+            result.combat.critical_data_status =
+                ParseCriticalDataStatus(status->get<std::string>());
+        }
+        if (const auto histogram = quality.find("damage_flag_histogram");
+            histogram != quality.end()) {
+            for (const auto& item : *histogram) {
+                result.combat.damage_flag_histogram.push_back({
+                    item.at("flags").get<std::uint32_t>(),
+                    ParseDecimal<std::uint64_t>(
+                        item.at("count"), "quality.damage_flag_histogram.count")});
+            }
+        }
         const Json& transport = document.at("transport");
         result.websocket_port = transport.at("port").get<std::uint16_t>();
         result.connected_clients = transport.at("connected_clients").get<std::uint32_t>();

@@ -73,13 +73,23 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
         event.reaction_type = 6;
         event.reaction_display_type = 7;
         event.source_name = "Skill \"A\"";
+        event.source_display_name = "技能甲";
+        event.source_name_origin = "catalog";
+        event.name_catalog_version = "2026.08.28";
         event.attacker_name = "Actor/A";
+        event.attacker_display_name = "角色甲";
+        event.attacker_name_origin = "catalog";
         event.victim_name = "Actor/B";
+        event.victim_display_name = "目标乙";
+        event.victim_name_origin = "catalog";
         Check(repository.Append(LoggedDamage{
                   event, 1'700'000'000'200, 200'000, true}, error),
               "damage should append");
         EncounterClose close{encounter_id, "inactivity",
             1'700'000'010'100, 10'100'000, 100, 0, 10.0, 10.0, {}};
+        close.critical_data_status =
+            nte::combat_stats::CriticalDataStatus::Unavailable;
+        close.damage_flag_histogram = {{16, 1}};
         close.service_unavailable_intervals.emplace_back(3'000'000, 4'000'000);
         close.missing_sequence_ranges.emplace_back(92, 94);
         close.open_missing_sequence_start = 95;
@@ -88,12 +98,16 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
         player.handle = event.attacker;
         player.object_path = event.attacker_name;
         player.label = "Actor/A";
+        player.display_name = "角色甲";
+        player.name_origin = "catalog";
+        player.name_catalog_version = "2026.08.28";
         player.damage = 100;
         player.positive_hits = 1;
         player.critical_hits = 1;
         player.maximum_hit = 100;
         player.maximum_source_id = event.source_id;
         player.maximum_source_name = event.source_name;
+        player.maximum_source_display_name = event.source_display_name;
         player.damage_share = 100.0;
         player.encounter_dps = 10.0;
         player.active_dps = 100.0;
@@ -127,6 +141,10 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
           "64-bit source id should be encoded as a decimal string");
     Check(events.find("\"source_name\":\"Skill \\\"A\\\"\"") != std::string::npos,
           "JSON strings should be escaped");
+    Check(events.find("\"source_name_origin\":\"catalog\"") != std::string::npos &&
+              events.find("\"attacker_name_origin\":\"catalog\"") != std::string::npos &&
+              events.find("\"victim_name_origin\":\"catalog\"") != std::string::npos,
+          "events should retain display-name origins for historical priority");
     Check(!events.empty() && events.back() == '\n', "JSONL should end with a newline");
     const std::string encounters = ReadAll(report_path / "encounters.jsonl");
     Check(encounters.find("\"actor_outgoing\"") != std::string::npos &&
@@ -137,6 +155,11 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
           "encounter summary should contain all participant aggregate dimensions");
     Check(encounters.find("\"critical_hits\":\"1\"") != std::string::npos,
           "encounter aggregates should retain critical hit counts");
+    Check(encounters.find("\"critical_data_status\":\"unavailable\"") !=
+              std::string::npos &&
+          encounters.find("\"damage_flag_histogram\":[{\"flags\":16,\"count\":\"1\"}]") !=
+              std::string::npos,
+          "encounter metadata should explain unavailable critical data with raw flags");
     Check(encounters.find("\"confirmed_controlled_players\":[{\"actor_id\":1") !=
               std::string::npos &&
           encounters.find("\"maximum_ability_id\":1") != std::string::npos &&
@@ -158,6 +181,11 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
           ReadAll(report_path / "abilities.jsonl").find(
               "\"resolution_status\":\"resolved\"") != std::string::npos,
           "actor and ability dictionaries should persist resolution state");
+    Check(ReadAll(report_path / "actors.jsonl").find(
+              "\"display_name\":\"角色甲\"") != std::string::npos &&
+          ReadAll(report_path / "abilities.jsonl").find(
+              "\"display_name\":\"技能甲\"") != std::string::npos,
+          "actor and ability dictionaries should persist localized display metadata");
     Check(ReadAll(report_path / "actors.jsonl").find(
               "\"actor_id\":0") != std::string::npos &&
           ReadAll(report_path / "abilities.jsonl").find(

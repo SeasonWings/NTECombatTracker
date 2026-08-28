@@ -131,7 +131,10 @@ bool CombatStatsEngine::IsRelevant(
 
 CombatStatsEngine::PlayerAggregate& CombatStatsEngine::ConfirmControlledActor(
     const Handle handle,
-    const std::string& object_path) {
+    const std::string& object_path,
+    const std::string& display_name,
+    const std::string& name_origin,
+    const std::string& catalog_version) {
     const bool resolved = IsResolvedParticipant(object_path);
     const std::string identity = resolved ? PathIdentity(object_path) : HandleIdentity(handle);
     if (resolved) {
@@ -143,7 +146,8 @@ CombatStatsEngine::PlayerAggregate& CombatStatsEngine::ConfirmControlledActor(
                     found == confirmed_controlled_actors_.end()) {
                     previous.key() = identity;
                     previous.mapped().object_path = object_path;
-                    previous.mapped().label = ParticipantLabel(object_path, handle);
+                    previous.mapped().label = display_name.empty()
+                        ? ParticipantLabel(object_path, handle) : display_name;
                     confirmed_controlled_actors_.insert(std::move(previous));
                 } else {
                     PlayerAggregate& destination = found->second;
@@ -175,6 +179,12 @@ CombatStatsEngine::PlayerAggregate& CombatStatsEngine::ConfirmControlledActor(
                         destination.maximum_hit = source.maximum_hit;
                         destination.maximum_source_id = source.maximum_source_id;
                         destination.maximum_source_name = std::move(source.maximum_source_name);
+                        destination.maximum_source_display_name =
+                            std::move(source.maximum_source_display_name);
+                        destination.maximum_source_name_origin =
+                            std::move(source.maximum_source_name_origin);
+                        destination.maximum_source_catalog_version =
+                            std::move(source.maximum_source_catalog_version);
                     }
                     if (destination.first_positive_damage == TimePoint{} ||
                         (source.first_positive_damage != TimePoint{} &&
@@ -194,8 +204,12 @@ CombatStatsEngine::PlayerAggregate& CombatStatsEngine::ConfirmControlledActor(
     aggregate.handle = handle;
     if (resolved) aggregate.object_path = object_path;
     if (aggregate.label.empty() || resolved) {
-        aggregate.label = ParticipantLabel(aggregate.object_path, handle);
+        aggregate.label = display_name.empty()
+            ? ParticipantLabel(aggregate.object_path, handle) : display_name;
     }
+    aggregate.display_name = aggregate.label;
+    aggregate.name_origin = name_origin;
+    aggregate.name_catalog_version = catalog_version;
     return aggregate;
 }
 
@@ -215,13 +229,19 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
         quality_.aggregate_truncated = pending_quality_.aggregate_truncated;
         pending_quality_ = {};
     }
+    auto& flag_count = damage_flag_histogram_[event.flags];
+    quality_.overflow = SaturatingIncrement(flag_count) || quality_.overflow;
     PlayerAggregate* outgoing_player{};
     if (outgoing) {
-        outgoing_player = &ConfirmControlledActor(event.attacker, event.attacker_name);
+        outgoing_player = &ConfirmControlledActor(event.attacker, event.attacker_name,
+            event.attacker_display_name, event.attacker_name_origin,
+            event.name_catalog_version);
     }
     PlayerAggregate* incoming_player{};
     if (incoming) {
-        incoming_player = &ConfirmControlledActor(event.victim, event.victim_name);
+        incoming_player = &ConfirmControlledActor(event.victim, event.victim_name,
+            event.victim_display_name, event.victim_name_origin,
+            event.name_catalog_version);
     }
     if (relevant) last_activity_ = now;
     if (IsPositiveDamage(event)) {
@@ -230,12 +250,18 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
                 quality_.overflow;
             quality_.overflow = SaturatingIncrement(outgoing_positive_hits_) ||
                 quality_.overflow;
+            if ((event.flags & kDamageFlagClientPresented) != 0) {
+                quality_.overflow = SaturatingIncrement(
+                    critical_metadata_positive_hits_) || quality_.overflow;
+            }
             maximum_outgoing_hit_ = (std::max)(maximum_outgoing_hit_, event.final_damage);
             if (first_positive_outgoing_ == TimePoint{}) first_positive_outgoing_ = now;
             last_positive_outgoing_ = now;
             rolling_outgoing_.push_back({now, event.final_damage});
             AddBoundedAggregate(
-                outgoing_sources_, event.source_id, event.source_name,
+                outgoing_sources_, event.source_id,
+                event.source_display_name.empty()
+                    ? event.source_name : event.source_display_name,
                 event.final_damage, other_outgoing_source_, quality_.aggregate_truncated,
                 quality_.overflow);
             AddBoundedAggregate(
@@ -263,6 +289,13 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
                     outgoing_player->maximum_hit = event.final_damage;
                     outgoing_player->maximum_source_id = event.source_id;
                     outgoing_player->maximum_source_name = event.source_name;
+                    outgoing_player->maximum_source_display_name =
+                        event.source_display_name.empty()
+                            ? event.source_name : event.source_display_name;
+                    outgoing_player->maximum_source_name_origin =
+                        event.source_name_origin;
+                    outgoing_player->maximum_source_catalog_version =
+                        event.name_catalog_version;
                 }
                 if (outgoing_player->first_positive_damage == TimePoint{}) {
                     outgoing_player->first_positive_damage = now;
@@ -278,7 +311,10 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
                 quality_.overflow;
             AddBoundedAggregate(
                 incoming_sources_, SourceKey{event.source_id, event.attacker},
-                event.attacker_name + " / " + event.source_name,
+                (event.attacker_display_name.empty()
+                    ? event.attacker_name : event.attacker_display_name) + " / " +
+                (event.source_display_name.empty()
+                    ? event.source_name : event.source_display_name),
                 event.final_damage, other_incoming_source_, quality_.aggregate_truncated,
                 quality_.overflow);
             if (incoming_player != nullptr) {
@@ -317,8 +353,11 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
     recent.received_utc_ms = event.received_utc_ms;
     recent.received_offset_us = event.received_offset_us;
     recent.source = event.source_name;
+    recent.source_display_name = event.source_display_name;
     recent.attacker = event.attacker_name;
+    recent.attacker_display_name = event.attacker_display_name;
     recent.victim = event.victim_name;
+    recent.victim_display_name = event.victim_display_name;
     if (recent_events_.size() == 256) recent_events_.erase(recent_events_.begin());
     recent_events_.push_back(std::move(recent));
     return true;
@@ -342,8 +381,10 @@ void CombatStatsEngine::ClearEncounter() {
     outgoing_positive_hits_ = 0;
     incoming_positive_hits_ = 0;
     non_positive_events_ = 0;
+    critical_metadata_positive_hits_ = 0;
     maximum_outgoing_hit_ = 0;
     recent_events_.clear();
+    damage_flag_histogram_.clear();
     rolling_outgoing_.clear();
     outgoing_sources_.clear();
     outgoing_targets_.clear();
@@ -384,6 +425,26 @@ Snapshot CombatStatsEngine::BuildSnapshot(const TimePoint now) const {
     snapshot.outgoing_positive_hits = outgoing_positive_hits_;
     snapshot.incoming_positive_hits = incoming_positive_hits_;
     snapshot.non_positive_events = non_positive_events_;
+    if (outgoing_positive_hits_ != 0) {
+        const bool any_explicit_critical = std::ranges::any_of(
+            confirmed_controlled_actors_, [](const auto& item) {
+                return item.second.critical_hits != 0;
+            });
+        // CHARACTER_EVENT in Anomaly 1.7.0 has no capability bit proving that
+        // critical metadata is complete. Observed presentation/critical bits are
+        // therefore evidence of partial metadata only; Available is reserved for
+        // a future explicit SDK validity signal.
+        snapshot.critical_data_status =
+            quality_.partial || critical_metadata_positive_hits_ != 0 ||
+                    any_explicit_critical
+                ? CriticalDataStatus::Partial
+                : CriticalDataStatus::Unavailable;
+    }
+    snapshot.damage_flag_histogram.reserve(damage_flag_histogram_.size());
+    for (const auto& [flags, count] : damage_flag_histogram_) {
+        snapshot.damage_flag_histogram.push_back({flags, count});
+    }
+    std::ranges::sort(snapshot.damage_flag_histogram, {}, &DamageFlagCount::flags);
     snapshot.maximum_outgoing_hit = maximum_outgoing_hit_;
     snapshot.recent_events = recent_events_;
     snapshot.quality = quality_;
@@ -434,6 +495,9 @@ Snapshot CombatStatsEngine::BuildSnapshot(const TimePoint now) const {
         row.handle = aggregate.handle;
         row.object_path = aggregate.object_path;
         row.label = aggregate.label;
+        row.display_name = aggregate.display_name;
+        row.name_origin = aggregate.name_origin;
+        row.name_catalog_version = aggregate.name_catalog_version;
         row.damage = aggregate.damage;
         row.positive_hits = aggregate.positive_hits;
         row.critical_hits = aggregate.critical_hits;
@@ -442,6 +506,10 @@ Snapshot CombatStatsEngine::BuildSnapshot(const TimePoint now) const {
         row.maximum_hit = aggregate.maximum_hit;
         row.maximum_source_id = aggregate.maximum_source_id;
         row.maximum_source_name = aggregate.maximum_source_name;
+        row.maximum_source_display_name = aggregate.maximum_source_display_name;
+        row.maximum_source_name_origin = aggregate.maximum_source_name_origin;
+        row.maximum_source_catalog_version =
+            aggregate.maximum_source_catalog_version;
         row.damage_share = outgoing_damage_ > 0
             ? static_cast<double>(aggregate.damage) * 100.0 /
                 static_cast<double>(outgoing_damage_)
