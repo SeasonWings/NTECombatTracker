@@ -2,7 +2,10 @@
 
 #include "overlay_protocol.hpp"
 
+#include <array>
 #include <cstdint>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace nte::combat_stats::overlay {
@@ -34,8 +37,62 @@ struct LayoutMetrics {
     float title_height{};
     float header_height{};
     float row_height{};
+    float footer_height{};
     float resize_grip{};
     std::size_t visible_rows{};
+};
+
+struct ReferenceTheme {
+    std::uint32_t title_background{};
+    std::uint32_t header_background{};
+    std::uint32_t content_background{};
+    std::uint32_t footer_background{};
+    std::uint32_t text{};
+    std::uint32_t muted_text{};
+    std::uint32_t accent{};
+    std::uint32_t separator{};
+};
+
+struct ReferenceMetrics {
+    float title_height{};
+    float header_height{};
+    float row_height{};
+    float footer_height{};
+    float resize_grip{};
+    float player_name_inset{};
+};
+
+struct ViewRect {
+    float left{};
+    float top{};
+    float right{};
+    float bottom{};
+};
+
+struct TitleBarLayout {
+    ViewRect history;
+    ViewRect manual_end;
+    ViewRect time;
+    ViewRect title;
+    ViewRect target;
+    ViewRect collapse;
+    ViewRect menu;
+};
+
+struct SummaryColumn {
+    std::wstring_view label;
+    SortColumn sort;
+    float weight;
+};
+
+enum class FooterPage : std::uint8_t { Live, HistoryList, HistoryDetail };
+
+struct FooterData {
+    std::size_t live_players{};
+    double live_dps{};
+    std::size_t history_count{};
+    std::size_t history_players{};
+    double history_dps{};
 };
 
 struct WindowExtent {
@@ -82,5 +139,17 @@ enum class HitRegion : std::uint8_t {
     float x,
     float y,
     bool locked) noexcept;
+[[nodiscard]] ReferenceTheme OverlayReferenceTheme() noexcept;
+[[nodiscard]] ReferenceMetrics OverlayReferenceMetrics() noexcept;
+[[nodiscard]] TitleBarLayout CalculateTitleBarLayout(
+    float width, float scale, float title_height) noexcept;
+[[nodiscard]] std::uint32_t StablePlayerColor(std::string_view identity) noexcept;
+[[nodiscard]] double PlayerBarFraction(
+    std::int64_t damage, std::int64_t maximum_damage) noexcept;
+[[nodiscard]] const std::array<SummaryColumn, 6>& OutgoingSummaryColumns() noexcept;
+[[nodiscard]] bool IsOutgoingSummarySort(SortColumn column) noexcept;
+[[nodiscard]] long long RoundedPercent(double value) noexcept;
+[[nodiscard]] float PlayerNameInset(float scale) noexcept;
+[[nodiscard]] std::wstring FooterSummary(FooterPage page, const FooterData& data);
 
 }  // namespace nte::combat_stats::overlay

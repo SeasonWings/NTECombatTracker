@@ -65,18 +65,32 @@ void ClosedLogsCanBeBrowsedAndDrilledDown() {
             "first fixture event should append");
         auto second = first;
         second.sequence = 11;
+        second.attacker = {player.id, 2};
         second.final_damage = 80;
         second.flags = 0;
         Check(repository.Append(LoggedDamage{
             second, 1'700'000'001'750, 1'750'000, true}, error),
             "second fixture event should append");
+        auto immune = second;
+        immune.sequence = 12;
+        immune.final_damage = 0;
+        immune.flags = nte::combat_stats::kDamageFlagCritical;
+        Check(repository.Append(LoggedDamage{
+            immune, 1'700'000'001'850, 1'850'000, true}, error),
+            "zero-damage fixture event should append");
+        auto negative = immune;
+        negative.sequence = 13;
+        negative.final_damage = -10;
+        Check(repository.Append(LoggedDamage{
+            negative, 1'700'000'001'950, 1'950'000, true}, error),
+            "negative fixture event should append");
         PlayerRow row;
         row.handle = player;
         row.object_path = first.attacker_name;
         row.label = "player_C";
         row.damage = 200;
-        row.positive_hits = 2;
-        row.critical_hits = 1;
+        row.positive_hits = 99;
+        row.critical_hits = 99;
         row.maximum_hit = 120;
         row.maximum_source_id = 77;
         row.maximum_source_name = "SkillA";
@@ -107,7 +121,10 @@ void ClosedLogsCanBeBrowsedAndDrilledDown() {
     if (detail) {
         Check(detail->players.size() == 1 && detail->players[0].handle == player,
             "report-local actor ids should resolve back to player handles");
-        Check(detail->events.size() == 2 && detail->events[0].sequence == 10,
+        Check(detail->players.size() == 1 && detail->players[0].positive_hits == 2 &&
+                  detail->players[0].critical_hits == 1,
+            "history should recompute hit and critical counts from raw events across generations");
+        Check(detail->events.size() == 4 && detail->events[0].sequence == 10,
             "all matching raw events should load in sequence order");
         const auto sources = nte::combat_stats::overlay::GroupDamageSources(
             detail->events, player, DetailDirection::Outgoing);
@@ -133,6 +150,15 @@ void ClosedLogsCanBeBrowsedAndDrilledDown() {
             Check(renamed_hits.size() == 1,
                 "source drill-down should retain the selected source name");
         }
+
+        auto incomplete_players = detail->players;
+        incomplete_players[0].positive_hits = 7;
+        incomplete_players[0].critical_hits = 4;
+        nte::combat_stats::overlay::RecomputePlayerHitCounts(
+            detail->events, incomplete_players, false);
+        Check(incomplete_players[0].positive_hits == 7 &&
+                  incomplete_players[0].critical_hits == 4,
+            "incomplete history must retain persisted hit counts instead of using partial events");
     }
 
     std::error_code ignored;

@@ -224,7 +224,7 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
         incoming_player = &ConfirmControlledActor(event.victim, event.victim_name);
     }
     if (relevant) last_activity_ = now;
-    if (event.final_damage > 0) {
+    if (IsPositiveDamage(event)) {
         if (outgoing) {
             quality_.overflow = SaturatingAdd(outgoing_damage_, event.final_damage) ||
                 quality_.overflow;
@@ -247,15 +247,15 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
                     outgoing_player->damage, event.final_damage) || quality_.overflow;
                 quality_.overflow = SaturatingIncrement(outgoing_player->positive_hits) ||
                     quality_.overflow;
-                if ((event.flags & (1u << 1u)) != 0) {
+                if (IsCriticalPositiveDamage(event)) {
                     quality_.overflow = SaturatingIncrement(outgoing_player->critical_hits) ||
                         quality_.overflow;
                 }
-                if ((event.flags & (1u << 2u)) != 0) {
+                if ((event.flags & kDamageFlagHeadHit) != 0) {
                     quality_.overflow = SaturatingIncrement(outgoing_player->head_hits) ||
                         quality_.overflow;
                 }
-                if ((event.flags & (1u << 3u)) != 0) {
+                if ((event.flags & kDamageFlagWeakUnbalance) != 0) {
                     quality_.overflow = SaturatingIncrement(outgoing_player->weak_hits) ||
                         quality_.overflow;
                 }

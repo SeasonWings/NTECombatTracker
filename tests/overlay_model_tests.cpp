@@ -49,26 +49,65 @@ void SortsEachSupportedMetricStably() {
 }
 
 void LayoutScalesAndCapsRows() {
-    const auto normal = CalculateLayout(520.0F, 220.0F, 1.0F, false, 10);
-    Check(normal.title_height == 34.0F && normal.header_height == 28.0F,
+    const auto normal = CalculateLayout(560.0F, 400.0F, 1.0F, false, 10);
+    Check(normal.title_height == 46.0F && normal.header_height == 28.0F &&
+              normal.footer_height == 32.0F,
           "default title and header dimensions match the design");
-    Check(normal.visible_rows == 5, "rows are clipped to available client height");
-    const auto dpi = CalculateLayout(780.0F, 330.0F, 1.5F, false, 10);
-    Check(dpi.visible_rows == 5 && dpi.resize_grip == 18.0F,
+    Check(normal.visible_rows == 9, "rows are clipped above the fixed footer");
+    const auto dpi = CalculateLayout(840.0F, 600.0F, 1.5F, false, 10);
+    Check(dpi.visible_rows == 9 && dpi.resize_grip == 18.0F,
           "DPI scaling preserves logical row count and hit targets");
-    const auto dpi200 = CalculateLayout(1040.0F, 440.0F, 2.0F, false, 10);
-    Check(dpi200.visible_rows == 5 && dpi200.title_height == 68.0F,
+    const auto dpi200 = CalculateLayout(1120.0F, 800.0F, 2.0F, false, 10);
+    Check(dpi200.visible_rows == 9 && dpi200.title_height == 92.0F,
           "200 percent DPI preserves logical layout proportions");
     const auto collapsed = CalculateLayout(520.0F, 220.0F, 1.0F, true, 10);
     Check(collapsed.visible_rows == 0 && collapsed.header_height == 0.0F,
           "collapsed layout only exposes the title bar");
 }
 
+void ReferenceVisualModelIsDeterministic() {
+    const auto theme = OverlayReferenceTheme();
+    Check(theme.title_background == 0x303030 && theme.content_background == 0x898989 &&
+              theme.accent == 0x00B8D4,
+          "reference theme should expose the fixed dark-gray and cyan palette");
+    const auto first = StablePlayerColor("path:/Game/Player/player_a_C");
+    const auto repeated = StablePlayerColor("path:/Game/Player/player_a_C");
+    const auto other = StablePlayerColor("path:/Game/Player/player_b_C");
+    Check(first == repeated && first != other,
+          "player identity should produce a stable palette color");
+    Check(std::abs(PlayerBarFraction(250, 500) - 0.5) < 0.0001 &&
+              PlayerBarFraction(800, 500) == 1.0 && PlayerBarFraction(10, 0) == 0.0,
+          "damage bars should be normalized to the highest visible damage");
+    const auto& columns = OutgoingSummaryColumns();
+    Check(columns[0].label == L"角色" && columns[1].label == L"总伤害" &&
+              columns[2].label == L"DPS" && columns[3].label == L"DPS%" &&
+              columns[4].label == L"暴击%" && columns[5].label == L"最高伤害",
+          "outgoing summary columns should match the fixed reference order");
+    Check(IsOutgoingSummarySort(SortColumn::Damage) &&
+              !IsOutgoingSummarySort(SortColumn::HeadRate),
+          "restored sorting should be limited to visible summary columns");
+    Check(RoundedPercent(33.333) == 33 && RoundedPercent(66.667) == 67,
+          "summary percentages should use integer rounding");
+    Check(PlayerNameInset(1.0F) == 28.0F && PlayerNameInset(1.5F) == 42.0F,
+          "player labels should reserve scaled space for the colored glyph");
+    const FooterData footer{3, 1811.4, 24, 2, 900.2};
+    Check(FooterSummary(FooterPage::Live, footer) == L"3人｜1811dps" &&
+              FooterSummary(FooterPage::HistoryList, footer) == L"24场历史战斗" &&
+              FooterSummary(FooterPage::HistoryDetail, footer) == L"2人｜900dps",
+          "footer text should use the active page data source");
+    const auto title = CalculateTitleBarLayout(560.0F, 1.0F, 46.0F);
+    Check(title.history.left == 6.0F && title.history.right == 38.0F &&
+              title.manual_end.left == 40.0F && title.manual_end.right == 82.0F &&
+              title.target.right == 494.0F && title.collapse.left == 496.0F &&
+              title.menu.right == 556.0F,
+          "title controls should use the immutable reference layout");
+}
+
 void HitTestingRespectsLockAndResizeGrip() {
     const auto layout = CalculateLayout(520.0F, 220.0F, 1.0F, false, 2);
     Check(HitTest(layout, 100.0F, 20.0F, false) == HitRegion::Title,
           "unlocked title bar can move the window");
-    Check(HitTest(layout, 100.0F, 40.0F, false) == HitRegion::ColumnHeader,
+    Check(HitTest(layout, 100.0F, 55.0F, false) == HitRegion::ColumnHeader,
           "column header is interactive");
     Check(HitTest(layout, 519.0F, 219.0F, false) == HitRegion::ResizeGrip,
           "bottom-right corner can resize the window");
@@ -110,5 +149,6 @@ int main() {
     LayoutScalesAndCapsRows();
     HitTestingRespectsLockAndResizeGrip();
     WindowExtentPreservesLogicalSizeAcrossDpiAndUiScale();
+    ReferenceVisualModelIsDeterministic();
     std::cout << "All overlay model tests passed\n";
 }

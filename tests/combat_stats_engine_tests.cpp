@@ -354,6 +354,47 @@ void DirectionAndNonPositiveRules() {
           "incoming share should use total encounter incoming damage");
 }
 
+void CriticalRateCountsOnlyPositiveOutgoingHits() {
+    CombatStatsEngine engine;
+    const TimePoint start{320s};
+    const Handle world{60, 1};
+    const Handle first_generation{61, 1};
+    const Handle second_generation{61, 2};
+    engine.ObserveCombatant(
+        Combatant{world, first_generation, 100.0, 100.0, 0.0}, start);
+
+    auto critical = Outgoing(1, world, first_generation, 100);
+    critical.attacker_name = "/Game/Player/player_critical_C";
+    critical.flags = nte::combat_stats::kDamageFlagCritical;
+    engine.AcceptDamage(critical, start);
+    auto normal = Outgoing(2, world, first_generation, 80);
+    normal.attacker_name = critical.attacker_name;
+    engine.AcceptDamage(normal, start + 1s);
+    engine.ObserveCombatant(
+        Combatant{world, second_generation, 100.0, 100.0, 0.0}, start + 2s);
+    auto rotated = Outgoing(3, world, second_generation, 60);
+    rotated.attacker_name = critical.attacker_name;
+    engine.AcceptDamage(rotated, start + 2s);
+    auto immune_critical = Outgoing(4, world, second_generation, 0);
+    immune_critical.attacker_name = critical.attacker_name;
+    immune_critical.flags = nte::combat_stats::kDamageFlagCritical;
+    engine.AcceptDamage(immune_critical, start + 3s);
+    auto negative_critical = Outgoing(5, world, second_generation, -10);
+    negative_critical.attacker_name = critical.attacker_name;
+    negative_critical.flags = nte::combat_stats::kDamageFlagCritical;
+    engine.AcceptDamage(negative_critical, start + 4s);
+
+    const auto snapshot = engine.BuildSnapshot(start + 4s);
+    Check(snapshot.players.size() == 1, "rotated character should remain one row");
+    if (!snapshot.players.empty()) {
+        const auto& row = snapshot.players.front();
+        Check(row.positive_hits == 3 && row.critical_hits == 1,
+            "only positive outgoing hits should enter the critical denominator");
+        Check(std::abs(nte::combat_stats::PlayerCriticalRate(row) - 100.0 / 3.0) < 0.001,
+            "one critical among three positive hits should be 33.33 percent");
+    }
+}
+
 void EncounterAndRollingDps() {
     CombatStatsEngine engine;
     const TimePoint start{400s};
@@ -566,6 +607,7 @@ int main() {
     SpectatorAndCrossWorldEventsDoNotConfirmCharacters();
     BothControlledParticipantsStoreOneVisibleEvent();
     DirectionAndNonPositiveRules();
+    CriticalRateCountsOnlyPositiveOutgoingHits();
     EncounterAndRollingDps();
     EncounterDpsUsesPlayerActivityWindow();
     AggregatesAndQualityFlags();

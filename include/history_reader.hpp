@@ -86,5 +86,12 @@ private:
     Handle player,
     DetailDirection direction,
     const DamageSourceSummary& source);
+void CanonicalizePlayerEvents(
+    std::vector<CombatEventDetail>& events,
+    const std::vector<PlayerRow>& players);
+void RecomputePlayerHitCounts(
+    const std::vector<CombatEventDetail>& events,
+    std::vector<PlayerRow>& players,
+    bool complete);
 
 }  // namespace nte::combat_stats::overlay

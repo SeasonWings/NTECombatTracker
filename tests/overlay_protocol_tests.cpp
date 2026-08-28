@@ -227,6 +227,24 @@ void ParserRejectsMissingRequiredFieldsAndUnsupportedVersions() {
           "inconsistent derived player metrics should be rejected");
 }
 
+void DerivedCriticalRateCannotExceedPositiveHits() {
+    auto snapshot = ExampleSnapshot();
+    std::string json = nte::combat_stats::SerializeOverlaySnapshot(snapshot);
+    const std::string hits = "\"positive_hits\":\"2\"";
+    json.replace(json.find(hits), hits.size(), "\"positive_hits\":\"0\"");
+    std::string error;
+    Check(!nte::combat_stats::ParseOverlaySnapshot(json, error).has_value(),
+          "critical count with zero positive hits should fail derived-rate validation");
+
+    json = nte::combat_stats::SerializeOverlaySnapshot(snapshot);
+    const std::string crits = "\"critical_hits\":\"1\"";
+    json.replace(json.find(crits), crits.size(), "\"critical_hits\":\"3\"");
+    const std::string rate = "\"critical_rate\":50.0";
+    json.replace(json.find(rate), rate.size(), "\"critical_rate\":150.0");
+    Check(!nte::combat_stats::ParseOverlaySnapshot(json, error).has_value(),
+          "critical hit count greater than positive hits must be rejected explicitly");
+}
+
 }  // namespace
 
 int main() {
@@ -236,6 +254,7 @@ int main() {
     ParserRejectsForeignSemantics();
     ParserRejectsMissingRequiredFieldsAndUnsupportedVersions();
     ParserDefaultsMissingOptionalExtensions();
+    DerivedCriticalRateCannotExceedPositiveHits();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return 1;

@@ -316,10 +316,49 @@ std::optional<EncounterDetail> CombatLogReader::Encounter(
             }
         }
         detail.events = Events(report_id, encounter_id, error);
+        if (error.empty() && !detail.events.empty()) {
+            CanonicalizePlayerEvents(detail.events, detail.players);
+        }
+        if (error.empty()) RecomputePlayerHitCounts(
+            detail.events, detail.players, detail.summary.complete);
         return detail;
     } catch (const std::exception& exception) {
         error = exception.what();
         return std::nullopt;
+    }
+}
+
+void CanonicalizePlayerEvents(
+    std::vector<CombatEventDetail>& events,
+    const std::vector<PlayerRow>& players) {
+    for (auto& event : events) {
+        for (const auto& player : players) {
+            if (!player.object_path.empty() && event.attacker_name == player.object_path) {
+                event.attacker = player.handle;
+            }
+            if (!player.object_path.empty() && event.victim_name == player.object_path) {
+                event.victim = player.handle;
+            }
+        }
+    }
+}
+
+void RecomputePlayerHitCounts(
+    const std::vector<CombatEventDetail>& events,
+    std::vector<PlayerRow>& players,
+    const bool complete) {
+    if (!complete || events.empty()) return;
+    for (auto& player : players) {
+        std::uint64_t positive_hits{};
+        std::uint64_t critical_hits{};
+        for (const auto& event : events) {
+            if (event.attacker != player.handle ||
+                !IsPositiveDamage(event.final_damage)) continue;
+            ++positive_hits;
+            if (IsCriticalPositiveDamage(event.final_damage, event.flags)) ++critical_hits;
+        }
+        player.positive_hits = positive_hits;
+        player.critical_hits = (std::min)(critical_hits, positive_hits);
     }
 }
 

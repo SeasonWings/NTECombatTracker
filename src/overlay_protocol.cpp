@@ -113,6 +113,10 @@ PlayerRow PlayerFromJson(const Json& value) {
         value.at("positive_hits"), "players.positive_hits");
     row.critical_hits = ParseDecimal<std::uint64_t>(
         value.at("critical_hits"), "players.critical_hits");
+    if (row.critical_hits > row.positive_hits) {
+        throw std::runtime_error(
+            "players.critical_hits must not exceed players.positive_hits");
+    }
     row.head_hits = ParseDecimal<std::uint64_t>(
         value.at("head_hits"), "players.head_hits");
     row.weak_hits = ParseDecimal<std::uint64_t>(

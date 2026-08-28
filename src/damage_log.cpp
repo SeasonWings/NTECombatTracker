@@ -21,15 +21,17 @@
 namespace nte::damage_log {
 namespace {
 
+using nte::combat_stats::IsCriticalPositiveDamage;
+using nte::combat_stats::kDamageFlagCritical;
+using nte::combat_stats::kDamageFlagHeadHit;
+using nte::combat_stats::kDamageFlagWeakUnbalance;
+
 constexpr std::size_t kFlushEventCount = 128;
 constexpr std::size_t kSealEventCount = 1024;
 constexpr std::size_t kSealByteCount = 1024 * 1024;
 constexpr std::size_t kMaximumAggregateKeys = 16384;
 constexpr std::size_t kMaximumDictionaryEntries = 4096;
 constexpr std::size_t kMaximumHistoryEncounters = 100;
-constexpr std::uint32_t kCriticalFlag = 1U << 1U;
-constexpr std::uint32_t kHeadHitFlag = 1U << 2U;
-constexpr std::uint32_t kWeakFlag = 1U << 3U;
 
 std::string JsonEscape(const std::string_view value) {
     std::string result;
@@ -426,9 +428,9 @@ struct DamageLogRepository::Impl {
             truncated = true;
         }
         ++row.hits;
-        if ((damage.event.flags & kCriticalFlag) != 0) ++row.critical_hits;
-        if ((damage.event.flags & kHeadHitFlag) != 0) ++row.head_hits;
-        if ((damage.event.flags & kWeakFlag) != 0) ++row.weak_hits;
+        if (IsCriticalPositiveDamage(damage.event)) ++row.critical_hits;
+        if ((damage.event.flags & kDamageFlagHeadHit) != 0) ++row.head_hits;
+        if ((damage.event.flags & kDamageFlagWeakUnbalance) != 0) ++row.weak_hits;
         row.maximum_hit = (std::max)(row.maximum_hit, damage.event.final_damage);
     }
 
@@ -848,9 +850,9 @@ bool DamageLogRepository::Append(const LoggedDamage& damage, std::string& error)
          << ",\"received_offset_us\":" << Decimal(damage.received_offset_us)
          << ",\"timestamp_basis\":\"client_receive\""
          << ",\"flags\":" << damage.event.flags
-         << ",\"critical\":" << ((damage.event.flags & kCriticalFlag) != 0 ? "true" : "false")
-         << ",\"head_hit\":" << ((damage.event.flags & kHeadHitFlag) != 0 ? "true" : "false")
-         << ",\"weak_unbalance\":" << ((damage.event.flags & kWeakFlag) != 0 ? "true" : "false")
+         << ",\"critical\":" << ((damage.event.flags & kDamageFlagCritical) != 0 ? "true" : "false")
+         << ",\"head_hit\":" << ((damage.event.flags & kDamageFlagHeadHit) != 0 ? "true" : "false")
+         << ",\"weak_unbalance\":" << ((damage.event.flags & kDamageFlagWeakUnbalance) != 0 ? "true" : "false")
          << ",\"player_related\":" << (damage.player_related ? "true" : "false")
          << ",\"world\":{\"id\":" << Decimal(damage.event.world.id)
          << ",\"generation\":" << Decimal(damage.event.world.generation) << '}'

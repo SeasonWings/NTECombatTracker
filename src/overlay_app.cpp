@@ -68,11 +68,6 @@ enum MenuId : UINT {
     MenuToggleCollapsed,
     MenuToggleTopmost,
     MenuToggleHideIdle,
-    MenuToggleTheme,
-    MenuToggleHead,
-    MenuToggleWeak,
-    MenuToggleActiveDps,
-    MenuToggleRollingDps,
     MenuOpacity60,
     MenuOpacity75,
     MenuOpacity90,
@@ -90,6 +85,8 @@ enum class DrillLevel : std::uint8_t { Players, Sources, Events };
 enum class UiAction : std::uint8_t {
     ManualEnd,
     ToggleHistory,
+    ToggleCollapsed,
+    OpenMenu,
     Back,
     OutgoingTab,
     IncomingTab,
@@ -105,47 +102,18 @@ struct HitTarget {
 struct Settings {
     int x{100};
     int y{100};
-    int width{520};
-    int height{220};
+    int width{560};
+    int height{400};
     bool locked{};
     bool collapsed{};
     bool topmost{true};
     bool hide_idle{};
-    bool light_theme{};
-    bool show_head{};
-    bool show_weak{};
-    bool show_active_dps{};
-    bool show_rolling_dps{};
     float opacity{0.90F};
     float ui_scale{1.0F};
     SortColumn sort_column{SortColumn::Damage};
     bool descending{true};
     DataTab active_tab{DataTab::Outgoing};
 };
-
-struct OverlayColumn {
-    std::wstring_view label;
-    SortColumn sort;
-    float weight;
-};
-
-std::vector<OverlayColumn> VisibleColumns(const Settings& settings) {
-    std::vector<OverlayColumn> result{
-        {L"角色", SortColumn::Character, 2.2F},
-        {L"伤害", SortColumn::Damage, 1.2F},
-        {L"占比", SortColumn::Share, 0.9F},
-        {L"DPS", SortColumn::EncounterDps, 1.0F},
-        {L"暴击", SortColumn::CriticalRate, 0.9F},
-        {L"最大一击", SortColumn::MaximumHit, 1.2F},
-    };
-    if (settings.show_head) result.push_back({L"爆头", SortColumn::HeadRate, 0.9F});
-    if (settings.show_weak) result.push_back({L"弱点", SortColumn::WeakRate, 0.9F});
-    if (settings.show_active_dps)
-        result.push_back({L"活跃 DPS", SortColumn::ActiveDps, 1.1F});
-    if (settings.show_rolling_dps)
-        result.push_back({L"10s DPS", SortColumn::RollingDps, 1.1F});
-    return result;
-}
 
 struct RenderResources {
     ComPtr<ID2D1Factory> d2d;
@@ -243,16 +211,15 @@ bool LoadSettings() {
         value.collapsed = json.value("collapsed", value.collapsed);
         value.topmost = json.value("topmost", value.topmost);
         value.hide_idle = json.value("hide_idle", value.hide_idle);
-        value.light_theme = json.value("light_theme", value.light_theme);
-        value.show_head = json.value("show_head", value.show_head);
-        value.show_weak = json.value("show_weak", value.show_weak);
-        value.show_active_dps = json.value("show_active_dps", value.show_active_dps);
-        value.show_rolling_dps = json.value("show_rolling_dps", value.show_rolling_dps);
         value.opacity = std::clamp(json.value("opacity", value.opacity), 0.4F, 1.0F);
         value.ui_scale = std::clamp(json.value("ui_scale", value.ui_scale), 0.75F, 2.0F);
         value.sort_column = static_cast<SortColumn>(std::clamp(
             json.value("sort_column", static_cast<int>(value.sort_column)), 0, 9));
         value.descending = json.value("descending", value.descending);
+        if (!nte::combat_stats::overlay::IsOutgoingSummarySort(value.sort_column)) {
+            value.sort_column = SortColumn::Damage;
+            value.descending = true;
+        }
         value.active_tab = static_cast<DataTab>(std::clamp(
             json.value("active_tab", static_cast<int>(value.active_tab)), 0, 1));
         return true;
@@ -287,10 +254,7 @@ void SaveSettings() {
         {"schema_version", 2}, {"x", value.x}, {"y", value.y},
         {"width", value.width}, {"height", value.height}, {"locked", value.locked},
         {"collapsed", value.collapsed}, {"topmost", value.topmost},
-        {"hide_idle", value.hide_idle}, {"show_head", value.show_head},
-        {"light_theme", value.light_theme},
-        {"show_weak", value.show_weak}, {"show_active_dps", value.show_active_dps},
-        {"show_rolling_dps", value.show_rolling_dps}, {"opacity", value.opacity},
+        {"hide_idle", value.hide_idle}, {"opacity", value.opacity},
         {"ui_scale", value.ui_scale},
         {"sort_column", static_cast<int>(value.sort_column)},
         {"descending", value.descending}};
@@ -401,11 +365,7 @@ bool Contains(const D2D1_RECT_F& rect, const float x, const float y) {
 std::vector<nte::combat_stats::overlay::CombatEventDetail> CanonicalPlayerEvents(
     std::vector<nte::combat_stats::overlay::CombatEventDetail> events,
     const PlayerRow& player) {
-    if (player.object_path.empty()) return events;
-    for (auto& event : events) {
-        if (event.attacker_name == player.object_path) event.attacker = player.handle;
-        if (event.victim_name == player.object_path) event.victim = player.handle;
-    }
+    nte::combat_stats::overlay::CanonicalizePlayerEvents(events, {player});
     return events;
 }
 
@@ -432,14 +392,25 @@ void RenderOverlay() {
     ComPtr<ID2D1SolidColorBrush> text;
     ComPtr<ID2D1SolidColorBrush> muted;
     ComPtr<ID2D1SolidColorBrush> accent;
+    ComPtr<ID2D1SolidColorBrush> hover;
     ComPtr<ID2D1SolidColorBrush> warning;
-    const bool light_theme = g_app.settings.light_theme;
-    target->CreateSolidColorBrush(D2D1::ColorF(
-        light_theme ? 0x15202B : 0xF3F6FA, 1.0F), &text);
-    target->CreateSolidColorBrush(D2D1::ColorF(
-        light_theme ? 0x516170 : 0xAAB4C0, 1.0F), &muted);
-    target->CreateSolidColorBrush(D2D1::ColorF(0x55B8FF, 0.32F), &accent);
+    ComPtr<ID2D1SolidColorBrush> title_background;
+    ComPtr<ID2D1SolidColorBrush> header_background;
+    ComPtr<ID2D1SolidColorBrush> footer_background;
+    ComPtr<ID2D1SolidColorBrush> separator;
+    const auto theme = nte::combat_stats::overlay::OverlayReferenceTheme();
+    target->CreateSolidColorBrush(D2D1::ColorF(theme.text, 1.0F), &text);
+    target->CreateSolidColorBrush(D2D1::ColorF(theme.muted_text, 1.0F), &muted);
+    target->CreateSolidColorBrush(D2D1::ColorF(theme.accent, 1.0F), &accent);
+    target->CreateSolidColorBrush(D2D1::ColorF(theme.accent, 0.20F), &hover);
     target->CreateSolidColorBrush(D2D1::ColorF(0xFFB454, 1.0F), &warning);
+    target->CreateSolidColorBrush(D2D1::ColorF(
+        theme.title_background, g_app.settings.opacity), &title_background);
+    target->CreateSolidColorBrush(D2D1::ColorF(
+        theme.header_background, g_app.settings.opacity), &header_background);
+    target->CreateSolidColorBrush(D2D1::ColorF(
+        theme.footer_background, g_app.settings.opacity), &footer_background);
+    target->CreateSolidColorBrush(D2D1::ColorF(theme.separator, 1.0F), &separator);
 
     std::optional<NteOverlaySnapshot> snapshot;
     std::optional<nte::combat_stats::overlay::EncounterDetail> history_detail;
@@ -481,10 +452,9 @@ void RenderOverlay() {
         !scaled_format(14.0F, DWRITE_FONT_WEIGHT_SEMI_BOLD, scaled_bold)) return;
 
     target->BeginDraw();
-    target->Clear(D2D1::ColorF(
-        light_theme ? 0xEDF2F7 : 0x10151D, g_app.settings.opacity));
+    target->Clear(D2D1::ColorF(theme.content_background, g_app.settings.opacity));
     target->FillRectangle(D2D1::RectF(0, 0, layout.width, layout.title_height),
-        accent.Get());
+        title_background.Get());
     g_app.hit_targets.clear();
     g_app.displayed_players.clear();
     g_app.displayed_sources.clear();
@@ -497,75 +467,129 @@ void RenderOverlay() {
     const auto draw_cells = [&](const std::vector<std::wstring>& cells,
                                 const std::vector<float>& weights,
                                 const D2D1_RECT_F row, IDWriteTextFormat* format,
-                                ID2D1Brush* brush) {
+                                ID2D1Brush* brush,
+                                const bool header = false,
+                                const float first_cell_inset = 0.0F) {
+        if (header) {
+            target->FillRectangle(row, header_background.Get());
+            target->DrawLine(D2D1::Point2F(row.left, row.bottom - scale),
+                D2D1::Point2F(row.right, row.bottom - scale), separator.Get(), scale);
+        }
         float total{};
         for (const float weight : weights) total += weight;
         float x = row.left;
         for (std::size_t index{}; index < cells.size(); ++index) {
             const float next = x + (row.right - row.left) * weights[index] / total;
             DrawTextLine(target.Get(), format, brush, cells[index],
-                D2D1::RectF(x + 6 * scale, row.top, next, row.bottom));
+                D2D1::RectF(x + 6 * scale + (index == 0 ? first_cell_inset : 0.0F),
+                    row.top, next, row.bottom));
             x = next;
         }
     };
-    DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), L"NTE Combat",
-        D2D1::RectF(8 * scale, 0, 96 * scale, layout.title_height));
-    const D2D1_RECT_F manual_rect = D2D1::RectF(
-        98 * scale, 4 * scale, 154 * scale, layout.title_height - 4 * scale);
+    const auto title_layout = nte::combat_stats::overlay::CalculateTitleBarLayout(
+        layout.width, scale, layout.title_height);
+    const auto to_d2d_rect = [](const nte::combat_stats::overlay::ViewRect rect) {
+        return D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom);
+    };
+    const D2D1_RECT_F history_rect = to_d2d_rect(title_layout.history);
+    DrawTextLine(target.Get(), scaled_bold.Get(), accent.Get(), L"◷", history_rect);
+    add_target(history_rect, UiAction::ToggleHistory);
+    const D2D1_RECT_F manual_rect = to_d2d_rect(title_layout.manual_end);
     const bool manual_enabled = g_app.page == ViewPage::Live && snapshot &&
         snapshot->combat.state == EncounterState::Active;
     if (manual_enabled) {
-        target->FillRectangle(manual_rect, warning.Get());
+        target->FillRectangle(manual_rect, hover.Get());
         add_target(manual_rect, UiAction::ManualEnd);
     }
     DrawTextLine(target.Get(), scaled_small.Get(), manual_enabled ? text.Get() : muted.Get(),
         L"结束", manual_rect);
-    const D2D1_RECT_F history_rect = D2D1::RectF(
-        layout.width - 70 * scale, 4 * scale, layout.width - 8 * scale,
-        layout.title_height - 4 * scale);
-    target->FillRectangle(history_rect, accent.Get());
-    DrawTextLine(target.Get(), scaled_small.Get(), text.Get(),
-        g_app.page == ViewPage::Live ? L"历史" : L"实时", history_rect);
-    add_target(history_rect, UiAction::ToggleHistory);
-    std::wstring title = Utf16(status);
-    if (snapshot) {
+    std::wstring title = g_app.page == ViewPage::Live ? L"当前战斗" : L"历史战斗";
+    std::wstring time = L"00:00";
+    std::wstring target_name;
+    if (g_app.page == ViewPage::HistoryDetail && history_detail) {
+        const int seconds = static_cast<int>(history_detail->summary.duration_seconds);
+        time = std::format(L"{:02}:{:02}", seconds / 60, seconds % 60);
+        target_name = Utf16(history_detail->summary.end_reason);
+        if (!history_detail->summary.complete) target_name += L" ⚠ 数据不完整";
+    } else if (g_app.page == ViewPage::HistoryList) {
+        target_name = std::format(L"{} 场已结束战斗", history.size());
+    } else if (snapshot) {
         const int seconds = static_cast<int>(snapshot->combat.duration_seconds);
-        title = std::format(L"{:02}:{:02}  {}", seconds / 60, seconds % 60,
-            connected ? StateText(*snapshot) : L"连接断开");
-        if (!snapshot->primary_target.empty()) title += L" · " + Utf16(snapshot->primary_target);
+        time = std::format(L"{:02}:{:02}", seconds / 60, seconds % 60);
+        target_name = snapshot->primary_target.empty()
+            ? (connected ? StateText(*snapshot) : L"连接断开")
+            : Utf16(snapshot->primary_target);
         if (snapshot->combat.quality.partial || snapshot->combat.quality.overflow ||
             snapshot->combat.quality.cursor_gap ||
-            snapshot->combat.quality.aggregate_truncated) title += L" ⚠ DATA";
+            snapshot->combat.quality.aggregate_truncated) target_name += L" ⚠";
     }
-    if (!g_app.action_status.empty()) title = Utf16(g_app.action_status);
+    if (!g_app.action_status.empty()) target_name = Utf16(g_app.action_status);
+    DrawTextLine(target.Get(), scaled_bold.Get(), accent.Get(), time,
+        to_d2d_rect(title_layout.time));
     DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), title,
-        D2D1::RectF(158 * scale, 0, layout.width - 74 * scale, layout.title_height));
+        to_d2d_rect(title_layout.title));
+    DrawTextLine(target.Get(), scaled_regular.Get(), muted.Get(), target_name,
+        to_d2d_rect(title_layout.target));
+    const D2D1_RECT_F collapse_rect = to_d2d_rect(title_layout.collapse);
+    DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(),
+        g_app.settings.collapsed ? L"⌄" : L"⌃", collapse_rect);
+    add_target(collapse_rect, UiAction::ToggleCollapsed);
+    const D2D1_RECT_F menu_rect = to_d2d_rect(title_layout.menu);
+    DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), L"⋮", menu_rect);
+    add_target(menu_rect, UiAction::OpenMenu);
 
     if (!g_app.settings.collapsed) {
-        const float tab_height = 30 * scale;
-        const float row_height = 30 * scale;
-        const float header_height = 27 * scale;
+        const float tab_height = layout.footer_height;
+        const float row_height = layout.row_height;
+        const float header_height = layout.header_height;
         float top = layout.title_height;
         const bool show_tabs = g_app.page != ViewPage::HistoryList;
-        const float content_bottom = layout.height - (show_tabs ? tab_height : 0.0F);
+        const float content_bottom = layout.height - tab_height;
+        target->FillRectangle(D2D1::RectF(0, content_bottom,
+            layout.width, layout.height), footer_background.Get());
         if (show_tabs) {
             const D2D1_RECT_F outgoing = D2D1::RectF(0, content_bottom,
-                layout.width / 2, layout.height);
-            const D2D1_RECT_F incoming = D2D1::RectF(layout.width / 2, content_bottom,
-                layout.width, layout.height);
-            target->FillRectangle(g_app.settings.active_tab == DataTab::Outgoing
-                ? outgoing : incoming, accent.Get());
-            DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), L"输出", outgoing);
-            DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), L"承伤", incoming);
+                58 * scale, layout.height);
+            const D2D1_RECT_F incoming = D2D1::RectF(58 * scale, content_bottom,
+                116 * scale, layout.height);
+            const bool outgoing_active = g_app.settings.active_tab == DataTab::Outgoing;
+            DrawTextLine(target.Get(), scaled_bold.Get(), outgoing_active ? accent.Get() : text.Get(),
+                L"输出", outgoing);
+            DrawTextLine(target.Get(), scaled_bold.Get(), outgoing_active ? text.Get() : accent.Get(),
+                L"承伤", incoming);
+            target->DrawLine(D2D1::Point2F(58 * scale, content_bottom),
+                D2D1::Point2F(58 * scale, layout.height), separator.Get(), scale);
+            target->DrawLine(D2D1::Point2F(116 * scale, content_bottom),
+                D2D1::Point2F(116 * scale, layout.height), separator.Get(), scale);
             add_target(outgoing, UiAction::OutgoingTab);
             add_target(incoming, UiAction::IncomingTab);
         }
+        nte::combat_stats::overlay::FooterData footer_data;
+        if (snapshot) {
+            footer_data.live_players = snapshot->combat.players.size();
+            footer_data.live_dps = snapshot->combat.encounter_dps;
+        }
+        footer_data.history_count = history.size();
+        if (history_detail) {
+            footer_data.history_players = history_detail->players.size();
+            footer_data.history_dps = history_detail->summary.encounter_dps;
+        }
+        const auto footer_page = g_app.page == ViewPage::HistoryList
+            ? nte::combat_stats::overlay::FooterPage::HistoryList
+            : (g_app.page == ViewPage::HistoryDetail
+                ? nte::combat_stats::overlay::FooterPage::HistoryDetail
+                : nte::combat_stats::overlay::FooterPage::Live);
+        const std::wstring footer_status =
+            nte::combat_stats::overlay::FooterSummary(footer_page, footer_data);
+        DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), footer_status,
+            D2D1::RectF(show_tabs ? 120 * scale : 8 * scale, content_bottom,
+                layout.width - 8 * scale, layout.height));
 
         if (g_app.page == ViewPage::HistoryList) {
             draw_cells({L"时间", L"时长", L"输出", L"承伤", L"DPS", L"结束原因", L"质量"},
                 {1.8F, 0.7F, 0.9F, 0.9F, 0.9F, 1.2F, 0.7F},
                 D2D1::RectF(0, top, layout.width, top + header_height),
-                scaled_small.Get(), muted.Get());
+                scaled_small.Get(), muted.Get(), true);
             top += header_height;
             g_app.displayed_history = std::move(history);
             const std::size_t visible = static_cast<std::size_t>(std::max(
@@ -582,7 +606,7 @@ void RenderOverlay() {
                 const D2D1_RECT_F rect = D2D1::RectF(0, top + row * row_height,
                     layout.width, top + (row + 1) * row_height);
                 const std::size_t target_index = g_app.hit_targets.size();
-                if (g_app.hovered_target == target_index) target->FillRectangle(rect, accent.Get());
+                if (g_app.hovered_target == target_index) target->FillRectangle(rect, hover.Get());
                 draw_cells({TimeText(item.started_utc_ms),
                     std::format(L"{:.1f}s", item.duration_seconds),
                     CompactNumber(static_cast<double>(item.outgoing_damage)),
@@ -631,6 +655,8 @@ void RenderOverlay() {
                 top += header_height;
             }
             std::size_t total_rows{};
+            std::vector<std::wstring> outgoing_headers;
+            std::vector<float> outgoing_weights;
             if (g_app.drill == DrillLevel::Players) {
                 if (g_app.settings.active_tab == DataTab::Outgoing) {
                     players = SortPlayers(players, g_app.settings.sort_column,
@@ -645,12 +671,19 @@ void RenderOverlay() {
                 }
                 g_app.displayed_players = std::move(players);
                 total_rows = g_app.displayed_players.size();
+                for (const auto& column :
+                     nte::combat_stats::overlay::OutgoingSummaryColumns()) {
+                    outgoing_headers.emplace_back(column.label);
+                    outgoing_weights.push_back(column.weight);
+                }
                 draw_cells(g_app.settings.active_tab == DataTab::Outgoing
-                        ? std::vector<std::wstring>{L"角色", L"伤害", L"占比", L"DPS", L"暴击", L"最大"}
+                        ? outgoing_headers
                         : std::vector<std::wstring>{L"角色", L"承伤", L"占比", L"次数", L"平均", L"最大"},
-                    {2.0F, 1.1F, 0.9F, 1.0F, 0.9F, 1.1F},
+                    g_app.settings.active_tab == DataTab::Outgoing
+                        ? outgoing_weights
+                        : std::vector<float>{2.0F, 1.1F, 0.9F, 1.0F, 0.9F, 1.1F},
                     D2D1::RectF(0, top, layout.width, top + header_height),
-                    scaled_small.Get(), muted.Get());
+                    scaled_small.Get(), muted.Get(), true);
             } else {
                 const auto selected = std::ranges::find_if(players, [&](const auto& player) {
                     return player.handle == g_app.selected_player;
@@ -667,7 +700,7 @@ void RenderOverlay() {
                     draw_cells({L"来源", L"伤害", L"次数", L"平均", L"最大"},
                         {2.5F, 1.1F, 0.8F, 1.0F, 1.0F},
                         D2D1::RectF(0, top, layout.width, top + header_height),
-                        scaled_small.Get(), muted.Get());
+                        scaled_small.Get(), muted.Get(), true);
                 } else {
                     g_app.displayed_events = nte::combat_stats::overlay::FilterDamageEvents(
                         events, g_app.selected_player, direction, g_app.selected_source);
@@ -676,7 +709,7 @@ void RenderOverlay() {
                             g_app.settings.active_tab == DataTab::Outgoing ? L"目标" : L"攻击者"},
                         {2.3F, 1.0F, 1.4F, 0.8F, 1.8F},
                         D2D1::RectF(0, top, layout.width, top + header_height),
-                        scaled_small.Get(), muted.Get());
+                        scaled_small.Get(), muted.Get(), true);
                 }
             }
             top += header_height;
@@ -686,12 +719,36 @@ void RenderOverlay() {
             g_app.scroll_offset = (std::min)(g_app.scroll_offset, g_app.maximum_scroll);
             const std::size_t count = (std::min)(visible,
                 total_rows - (std::min)(g_app.scroll_offset, total_rows));
+            std::int64_t maximum_player_damage{};
+            if (g_app.drill == DrillLevel::Players) {
+                for (const auto& player : g_app.displayed_players) {
+                    maximum_player_damage = (std::max)(maximum_player_damage,
+                        g_app.settings.active_tab == DataTab::Outgoing
+                            ? player.damage : player.incoming_damage);
+                }
+            }
             for (std::size_t row{}; row < count; ++row) {
                 const std::size_t index = g_app.scroll_offset + row;
                 const D2D1_RECT_F rect = D2D1::RectF(0, top + row * row_height,
                     layout.width, top + (row + 1) * row_height);
                 const std::size_t target_index = g_app.hit_targets.size();
-                if (g_app.hovered_target == target_index) target->FillRectangle(rect, accent.Get());
+                if (g_app.drill == DrillLevel::Players) {
+                    const auto& player = g_app.displayed_players[index];
+                    const std::int64_t damage = g_app.settings.active_tab == DataTab::Outgoing
+                        ? player.damage : player.incoming_damage;
+                    const float fraction = static_cast<float>(
+                        nte::combat_stats::overlay::PlayerBarFraction(
+                            damage, maximum_player_damage));
+                    ComPtr<ID2D1SolidColorBrush> player_bar;
+                    target->CreateSolidColorBrush(D2D1::ColorF(
+                        nte::combat_stats::overlay::StablePlayerColor(
+                            player.identity_key.empty() ? player.label : player.identity_key),
+                        0.78F), &player_bar);
+                    target->FillRectangle(D2D1::RectF(rect.left, rect.top,
+                        rect.left + (rect.right - rect.left) * fraction, rect.bottom),
+                        player_bar.Get());
+                }
+                if (g_app.hovered_target == target_index) target->FillRectangle(rect, hover.Get());
                 if (g_app.drill == DrillLevel::Players) {
                     const auto& player = g_app.displayed_players[index];
                     const bool outgoing = g_app.settings.active_tab == DataTab::Outgoing;
@@ -703,19 +760,34 @@ void RenderOverlay() {
                                 player.incoming_positive_hits);
                     draw_cells(outgoing
                         ? std::vector<std::wstring>{Utf16(player.label),
-                            CompactNumber(static_cast<double>(player.damage)),
-                            std::format(L"{:.1f}%", player.damage_share),
-                            CompactNumber(player.encounter_dps),
-                            std::format(L"{:.1f}%", PlayerCriticalRate(player)),
-                            CompactNumber(static_cast<double>(player.maximum_hit))}
+                            std::to_wstring(player.damage),
+                            std::format(L"{:.0f}", player.encounter_dps),
+                            std::format(L"{}%", nte::combat_stats::overlay::RoundedPercent(
+                                player.damage_share)),
+                            std::format(L"{}%", nte::combat_stats::overlay::RoundedPercent(
+                                PlayerCriticalRate(player))),
+                            std::format(L"{} {}", player.maximum_hit,
+                                Utf16(player.maximum_source_name))}
                         : std::vector<std::wstring>{Utf16(player.label),
                             CompactNumber(static_cast<double>(player.incoming_damage)),
                             std::format(L"{:.1f}%", player.incoming_share),
                             std::to_wstring(player.incoming_positive_hits),
                             CompactNumber(average),
                             CompactNumber(static_cast<double>(player.maximum_incoming_hit))},
-                        {2.0F, 1.1F, 0.9F, 1.0F, 0.9F, 1.1F}, rect,
-                        scaled_regular.Get(), text.Get());
+                        outgoing
+                            ? outgoing_weights
+                            : std::vector<float>{2.0F, 1.1F, 0.9F, 1.0F, 0.9F, 1.1F}, rect,
+                        scaled_regular.Get(), text.Get(),
+                        false,
+                        nte::combat_stats::overlay::PlayerNameInset(scale));
+                    const std::uint32_t glyph_color =
+                        nte::combat_stats::overlay::StablePlayerColor(
+                            player.identity_key.empty() ? player.label : player.identity_key);
+                    ComPtr<ID2D1SolidColorBrush> glyph;
+                    target->CreateSolidColorBrush(D2D1::ColorF(glyph_color, 1.0F), &glyph);
+                    DrawTextLine(target.Get(), scaled_bold.Get(), glyph.Get(), L"◇",
+                        D2D1::RectF(rect.left + 2 * scale, rect.top,
+                            rect.left + 26 * scale, rect.bottom));
                     add_target(rect, UiAction::SelectRow, index);
                 } else if (g_app.drill == DrillLevel::Sources) {
                     const auto& source = g_app.displayed_sources[index];
@@ -731,9 +803,12 @@ void RenderOverlay() {
                 } else {
                     const auto& event = g_app.displayed_events[index];
                     std::wstring flags;
-                    if ((event.flags & (1U << 1U)) != 0) flags += L"暴";
-                    if ((event.flags & (1U << 2U)) != 0) flags += L"头";
-                    if ((event.flags & (1U << 3U)) != 0) flags += L"弱";
+                    if ((event.flags & nte::combat_stats::kDamageFlagCritical) != 0)
+                        flags += L"暴";
+                    if ((event.flags & nte::combat_stats::kDamageFlagHeadHit) != 0)
+                        flags += L"头";
+                    if ((event.flags & nte::combat_stats::kDamageFlagWeakUnbalance) != 0)
+                        flags += L"弱";
                     const double relative = encounter_start_utc == 0 ? 0.0 :
                         static_cast<double>(event.received_utc_ms - encounter_start_utc) / 1000.0;
                     draw_cells({EventTimeText(event.received_utc_ms,
@@ -1091,8 +1166,10 @@ void ToggleCollapsed() {
     GetWindowRect(g_app.window, &rect);
     g_app.settings.collapsed = !g_app.settings.collapsed;
     const float dpi = static_cast<float>(GetDpiForWindow(g_app.window)) / 96.0F;
+    const float title_height =
+        nte::combat_stats::overlay::OverlayReferenceMetrics().title_height;
     const int height = g_app.settings.collapsed
-        ? static_cast<int>(std::round(34.0F * dpi * g_app.settings.ui_scale))
+        ? static_cast<int>(std::round(title_height * dpi * g_app.settings.ui_scale))
         : ScaleWindowExtent(1, g_app.settings.height,
             dpi, g_app.settings.ui_scale).height;
     SetWindowPos(g_app.window, nullptr, 0, 0, rect.right - rect.left, height,
@@ -1111,18 +1188,6 @@ void ShowContextMenu(const POINT screen) {
         MenuToggleTopmost, L"置顶");
     AppendMenuW(menu, MF_STRING | (g_app.settings.hide_idle ? MF_CHECKED : 0),
         MenuToggleHideIdle, L"离战隐藏");
-    AppendMenuW(menu, MF_STRING | (g_app.settings.light_theme ? MF_CHECKED : 0),
-        MenuToggleTheme, L"浅色主题");
-    HMENU columns = CreatePopupMenu();
-    AppendMenuW(columns, MF_STRING | (g_app.settings.show_head ? MF_CHECKED : 0),
-        MenuToggleHead, L"爆头率");
-    AppendMenuW(columns, MF_STRING | (g_app.settings.show_weak ? MF_CHECKED : 0),
-        MenuToggleWeak, L"弱点率");
-    AppendMenuW(columns, MF_STRING | (g_app.settings.show_active_dps ? MF_CHECKED : 0),
-        MenuToggleActiveDps, L"活跃 DPS");
-    AppendMenuW(columns, MF_STRING | (g_app.settings.show_rolling_dps ? MF_CHECKED : 0),
-        MenuToggleRollingDps, L"10 秒 DPS");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(columns), L"可选列");
     HMENU opacity = CreatePopupMenu();
     AppendMenuW(opacity, MF_STRING, MenuOpacity60, L"60%");
     AppendMenuW(opacity, MF_STRING, MenuOpacity75, L"75%");
@@ -1149,11 +1214,6 @@ void HandleMenu(const UINT id) {
     case MenuToggleCollapsed: ToggleCollapsed(); return;
     case MenuToggleTopmost: g_app.settings.topmost = !g_app.settings.topmost; ApplyWindowMode(); break;
     case MenuToggleHideIdle: g_app.settings.hide_idle = !g_app.settings.hide_idle; break;
-    case MenuToggleTheme: g_app.settings.light_theme = !g_app.settings.light_theme; break;
-    case MenuToggleHead: g_app.settings.show_head = !g_app.settings.show_head; break;
-    case MenuToggleWeak: g_app.settings.show_weak = !g_app.settings.show_weak; break;
-    case MenuToggleActiveDps: g_app.settings.show_active_dps = !g_app.settings.show_active_dps; break;
-    case MenuToggleRollingDps: g_app.settings.show_rolling_dps = !g_app.settings.show_rolling_dps; break;
     case MenuOpacity60: g_app.settings.opacity = 0.60F; break;
     case MenuOpacity75: g_app.settings.opacity = 0.75F; break;
     case MenuOpacity90: g_app.settings.opacity = 0.90F; break;
@@ -1174,9 +1234,11 @@ void HandleMenu(const UINT id) {
             g_app.settings.height = logical.height;
         }
         g_app.settings.ui_scale = next_scale;
+        const int collapsed_height = static_cast<int>(std::lround(
+            nte::combat_stats::overlay::OverlayReferenceMetrics().title_height));
         const auto extent = ScaleWindowExtent(
             g_app.settings.width,
-            g_app.settings.collapsed ? 34 : g_app.settings.height,
+            g_app.settings.collapsed ? collapsed_height : g_app.settings.height,
             dpi_scale, next_scale);
         SetWindowPos(g_app.window, nullptr, 0, 0,
             extent.width, extent.height,
@@ -1207,6 +1269,15 @@ void HandleUiAction(const HitTarget& target) {
         g_app.drill = DrillLevel::Players;
         g_app.scroll_offset = 0;
         break;
+    case UiAction::ToggleCollapsed:
+        ToggleCollapsed();
+        return;
+    case UiAction::OpenMenu: {
+        POINT point{};
+        GetCursorPos(&point);
+        ShowContextMenu(point);
+        return;
+    }
     case UiAction::Back:
         if (g_app.drill == DrillLevel::Events) g_app.drill = DrillLevel::Sources;
         else if (g_app.drill == DrillLevel::Sources) g_app.drill = DrillLevel::Players;
@@ -1366,10 +1437,14 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
     case WM_GETMINMAXINFO: {
         auto* limits = reinterpret_cast<MINMAXINFO*>(lparam);
         const float dpi = static_cast<float>(GetDpiForWindow(window)) / 96.0F;
+        const int collapsed_height = static_cast<int>(std::lround(
+            nte::combat_stats::overlay::OverlayReferenceMetrics().title_height));
         const auto minimum = ScaleWindowExtent(420,
-            g_app.settings.collapsed ? 34 : 180, dpi, g_app.settings.ui_scale);
+            g_app.settings.collapsed ? collapsed_height : 180,
+            dpi, g_app.settings.ui_scale);
         const auto maximum = ScaleWindowExtent(1400,
-            g_app.settings.collapsed ? 34 : 1000, dpi, g_app.settings.ui_scale);
+            g_app.settings.collapsed ? collapsed_height : 1000,
+            dpi, g_app.settings.ui_scale);
         limits->ptMinTrackSize = {minimum.width, minimum.height};
         limits->ptMaxTrackSize = {maximum.width, maximum.height};
         return 0;
@@ -1415,10 +1490,17 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         const float scale = static_cast<float>(GetDpiForWindow(window)) / 96.0F *
             g_app.settings.ui_scale;
         const float y = static_cast<float>(GET_Y_LPARAM(lparam));
-        if (!g_app.settings.collapsed && y >= 34.0F * scale && y < 62.0F * scale) {
+        const auto header_layout = CalculateLayout(
+            static_cast<float>(rect.right), static_cast<float>(rect.bottom), scale,
+            false, 0);
+        if (!g_app.settings.collapsed && g_app.page != ViewPage::HistoryList &&
+            g_app.drill == DrillLevel::Players &&
+            y >= header_layout.title_height &&
+            y < header_layout.title_height + header_layout.header_height) {
             const float fraction = static_cast<float>(GET_X_LPARAM(lparam)) /
                 static_cast<float>(std::max(1L, rect.right));
-            const auto columns = VisibleColumns(g_app.settings);
+            if (g_app.settings.active_tab != DataTab::Outgoing) return 0;
+            const auto& columns = nte::combat_stats::overlay::OutgoingSummaryColumns();
             float total_weight{};
             for (const auto& column : columns) total_weight += column.weight;
             std::size_t index{};
@@ -1616,9 +1698,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     window_class.hCursor = nullptr;
     window_class.lpszClassName = kWindowClass;
     if (!RegisterClassExW(&window_class)) { CoUninitialize(); CloseHandle(mutex); return 3; }
+    const int collapsed_height = static_cast<int>(std::lround(
+        nte::combat_stats::overlay::OverlayReferenceMetrics().title_height));
     const auto initial_extent = ScaleWindowExtent(
         g_app.settings.width,
-        g_app.settings.collapsed ? 34 : g_app.settings.height,
+        g_app.settings.collapsed ? collapsed_height : g_app.settings.height,
         static_cast<float>(GetDpiForSystem()) / 96.0F,
         g_app.settings.ui_scale);
     g_app.window = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -1628,7 +1712,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (!g_app.window) { CoUninitialize(); CloseHandle(mutex); return 4; }
     const auto monitor_extent = ScaleWindowExtent(
         g_app.settings.width,
-        g_app.settings.collapsed ? 34 : g_app.settings.height,
+        g_app.settings.collapsed ? collapsed_height : g_app.settings.height,
         static_cast<float>(GetDpiForWindow(g_app.window)) / 96.0F,
         g_app.settings.ui_scale);
     SetWindowPos(g_app.window, nullptr, 0, 0,

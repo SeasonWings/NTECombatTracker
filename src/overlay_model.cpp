@@ -1,7 +1,9 @@
 #include "overlay_model.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <format>
 #include <ranges>
 #include <string_view>
 
@@ -55,16 +57,112 @@ LayoutMetrics CalculateLayout(
     result.width = std::max(0.0F, width);
     result.height = std::max(0.0F, height);
     result.scale = std::clamp(scale, 0.5F, 4.0F);
-    result.title_height = 34.0F * result.scale;
-    result.resize_grip = 12.0F * result.scale;
+    const auto reference = OverlayReferenceMetrics();
+    result.title_height = reference.title_height * result.scale;
+    result.resize_grip = reference.resize_grip * result.scale;
     if (collapsed) return result;
-    result.header_height = 28.0F * result.scale;
-    result.row_height = 30.0F * result.scale;
+    result.header_height = reference.header_height * result.scale;
+    result.row_height = reference.row_height * result.scale;
+    result.footer_height = reference.footer_height * result.scale;
     const float available = std::max(
-        0.0F, result.height - result.title_height - result.header_height);
+        0.0F, result.height - result.title_height - result.header_height -
+            result.footer_height);
     const auto rows = static_cast<std::size_t>(available / result.row_height);
     result.visible_rows = std::min(rows, player_count);
     return result;
+}
+
+ReferenceTheme OverlayReferenceTheme() noexcept {
+    return {
+        0x303030, 0x454245, 0x898989, 0x303030,
+        0xF0F0F0, 0xB7B7B7, 0x00B8D4, 0x5D5D5D,
+    };
+}
+
+ReferenceMetrics OverlayReferenceMetrics() noexcept {
+    return {46.0F, 28.0F, 30.0F, 32.0F, 12.0F, 28.0F};
+}
+
+TitleBarLayout CalculateTitleBarLayout(
+    const float width,
+    const float scale,
+    const float title_height) noexcept {
+    const float safe_scale = std::clamp(scale, 0.5F, 4.0F);
+    const float safe_width = std::max(0.0F, width);
+    const float safe_height = std::max(0.0F, title_height);
+    return {
+        {6 * safe_scale, 5 * safe_scale, 38 * safe_scale, safe_height - 5 * safe_scale},
+        {40 * safe_scale, 7 * safe_scale, 82 * safe_scale, safe_height - 7 * safe_scale},
+        {84 * safe_scale, 0, 146 * safe_scale, safe_height},
+        {146 * safe_scale, 0, 252 * safe_scale, safe_height},
+        {252 * safe_scale, 0, safe_width - 66 * safe_scale, safe_height},
+        {safe_width - 64 * safe_scale, 4 * safe_scale,
+            safe_width - 34 * safe_scale, safe_height - 4 * safe_scale},
+        {safe_width - 32 * safe_scale, 4 * safe_scale,
+            safe_width - 4 * safe_scale, safe_height - 4 * safe_scale},
+    };
+}
+
+std::uint32_t StablePlayerColor(const std::string_view identity) noexcept {
+    constexpr std::array palette{
+        0xC48EA1U, 0xC5A654U, 0xB69A48U, 0x8C4266U,
+        0x5D667BU, 0x68769DU, 0x56728AU, 0x777777U,
+    };
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (const unsigned char value : identity) {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    }
+    return palette[hash % palette.size()];
+}
+
+double PlayerBarFraction(
+    const std::int64_t damage,
+    const std::int64_t maximum_damage) noexcept {
+    if (damage <= 0 || maximum_damage <= 0) return 0.0;
+    return std::clamp(static_cast<double>(damage) /
+        static_cast<double>(maximum_damage), 0.0, 1.0);
+}
+
+const std::array<SummaryColumn, 6>& OutgoingSummaryColumns() noexcept {
+    static constexpr std::array<SummaryColumn, 6> columns{{
+        {L"角色", SortColumn::Character, 1.7F},
+        {L"总伤害", SortColumn::Damage, 1.05F},
+        {L"DPS", SortColumn::EncounterDps, 0.85F},
+        {L"DPS%", SortColumn::Share, 0.8F},
+        {L"暴击%", SortColumn::CriticalRate, 0.8F},
+        {L"最高伤害", SortColumn::MaximumHit, 1.7F},
+    }};
+    return columns;
+}
+
+bool IsOutgoingSummarySort(const SortColumn column) noexcept {
+    const auto& columns = OutgoingSummaryColumns();
+    return std::ranges::any_of(columns,
+        [column](const auto& value) { return value.sort == column; });
+}
+
+long long RoundedPercent(const double value) noexcept {
+    if (!std::isfinite(value)) return 0;
+    return std::llround(std::clamp(value, 0.0, 100.0));
+}
+
+float PlayerNameInset(const float scale) noexcept {
+    return OverlayReferenceMetrics().player_name_inset *
+        std::clamp(scale, 0.5F, 4.0F);
+}
+
+std::wstring FooterSummary(const FooterPage page, const FooterData& data) {
+    switch (page) {
+    case FooterPage::Live:
+        return std::format(L"{}人｜{:.0f}dps", data.live_players, data.live_dps);
+    case FooterPage::HistoryList:
+        return std::format(L"{}场历史战斗", data.history_count);
+    case FooterPage::HistoryDetail:
+        return std::format(L"{}人｜{:.0f}dps",
+            data.history_players, data.history_dps);
+    }
+    return {};
 }
 
 WindowExtent ScaleWindowExtent(

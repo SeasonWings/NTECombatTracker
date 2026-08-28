@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <array>
 #include <cstdint>
@@ -56,6 +57,29 @@ struct DamageEvent {
     std::string attacker_name;
     std::string victim_name;
 };
+
+inline constexpr std::uint32_t kDamageFlagClientPresented = 1U << 0U;
+inline constexpr std::uint32_t kDamageFlagCritical = 1U << 1U;
+inline constexpr std::uint32_t kDamageFlagHeadHit = 1U << 2U;
+inline constexpr std::uint32_t kDamageFlagWeakUnbalance = 1U << 3U;
+
+[[nodiscard]] inline bool IsPositiveDamage(const std::int64_t final_damage) noexcept {
+    return final_damage > 0;
+}
+
+[[nodiscard]] inline bool IsPositiveDamage(const DamageEvent& event) noexcept {
+    return IsPositiveDamage(event.final_damage);
+}
+
+[[nodiscard]] inline bool IsCriticalPositiveDamage(
+    const std::int64_t final_damage,
+    const std::uint32_t flags) noexcept {
+    return IsPositiveDamage(final_damage) && (flags & kDamageFlagCritical) != 0;
+}
+
+[[nodiscard]] inline bool IsCriticalPositiveDamage(const DamageEvent& event) noexcept {
+    return IsCriticalPositiveDamage(event.final_damage, event.flags);
+}
 
 struct AggregateRow {
     std::string label;
