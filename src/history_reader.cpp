@@ -106,7 +106,7 @@ struct ActorName {
     std::string technical_name;
     std::string display_name;
     std::string name_origin;
-    std::string catalog_version;
+    std::string resource_version;
 };
 
 struct AbilityName {
@@ -114,7 +114,7 @@ struct AbilityName {
     std::string technical_name;
     std::string display_name;
     std::string name_origin;
-    std::string catalog_version;
+    std::string resource_version;
 };
 
 std::unordered_map<std::uint32_t, ActorName> LoadActors(
@@ -133,7 +133,8 @@ std::unordered_map<std::uint32_t, ActorName> LoadActors(
                    Decimal<std::uint64_t>(handle.at("generation"))},
             technical, value.value("display_name", ShortName(technical)),
             value.value("name_origin", std::string{"technical"}),
-            value.value("catalog_version", std::string{})});
+            value.value("name_resource_version",
+                value.value("catalog_version", std::string{}))});
     }
     return result;
 }
@@ -151,7 +152,8 @@ std::unordered_map<std::uint32_t, AbilityName> LoadAbilities(
             Decimal<std::uint64_t>(value.at("source_id")),
             technical, value.value("display_name", ShortName(technical)),
             value.value("name_origin", std::string{"technical"}),
-            value.value("catalog_version", std::string{})});
+            value.value("name_resource_version",
+                value.value("catalog_version", std::string{}))});
     }
     return result;
 }
@@ -177,19 +179,25 @@ CombatEventDetail ParseEvent(const Json& value) {
     result.source = value.at("source_name").get<std::string>();
     result.source_display_name = value.value("source_display_name", ShortName(result.source));
     result.source_name_origin = value.value("source_name_origin", std::string{"technical"});
-    result.source_catalog_version = value.value("name_catalog_version", std::string{});
+    result.source_resource_version = value.value(
+        "name_resource_version",
+        value.value("name_catalog_version", std::string{}));
     result.attacker_name = value.value("attacker_name", std::string{});
     result.attacker_display_name = value.value(
         "attacker_display_name", ShortName(result.attacker_name));
     result.attacker_name_origin = value.value(
         "attacker_name_origin", std::string{"technical"});
-    result.attacker_catalog_version = value.value("name_catalog_version", std::string{});
+    result.attacker_resource_version = value.value(
+        "name_resource_version",
+        value.value("name_catalog_version", std::string{}));
     result.victim_name = value.value("victim_name", std::string{});
     result.victim_display_name = value.value(
         "victim_display_name", ShortName(result.victim_name));
     result.victim_name_origin = value.value(
         "victim_name_origin", std::string{"technical"});
-    result.victim_catalog_version = value.value("name_catalog_version", std::string{});
+    result.victim_resource_version = value.value(
+        "name_resource_version",
+        value.value("name_catalog_version", std::string{}));
     return result;
 }
 
@@ -302,8 +310,8 @@ std::vector<CombatEventDetail> CombatLogReader::Events(
                                 attacker->second.name_origin != "technical") {
                                 event.attacker_display_name = attacker->second.display_name;
                                 event.attacker_name_origin = attacker->second.name_origin;
-                                event.attacker_catalog_version =
-                                    attacker->second.catalog_version;
+                                event.attacker_resource_version =
+                                    attacker->second.resource_version;
                             }
                         }
                         if (const auto victim = actor_names.find(event.victim);
@@ -313,7 +321,7 @@ std::vector<CombatEventDetail> CombatLogReader::Events(
                                 victim->second.name_origin != "technical") {
                                 event.victim_display_name = victim->second.display_name;
                                 event.victim_name_origin = victim->second.name_origin;
-                                event.victim_catalog_version = victim->second.catalog_version;
+                                event.victim_resource_version = victim->second.resource_version;
                             }
                         }
                         if (const auto source = ability_names.find(event.source_id);
@@ -322,7 +330,7 @@ std::vector<CombatEventDetail> CombatLogReader::Events(
                             source->second.name_origin != "technical") {
                             event.source_display_name = source->second.display_name;
                             event.source_name_origin = source->second.name_origin;
-                            event.source_catalog_version = source->second.catalog_version;
+                            event.source_resource_version = source->second.resource_version;
                         }
                         result.push_back(std::move(event));
                     }
@@ -384,7 +392,7 @@ std::optional<EncounterDetail> CombatLogReader::Encounter(
                 player.object_path = actor->second.technical_name;
                 player.display_name = actor->second.display_name;
                 player.name_origin = actor->second.name_origin;
-                player.name_catalog_version = actor->second.catalog_version;
+                player.name_resource_version = actor->second.resource_version;
             }
             player.identity_key = "path:" + player.object_path;
             player.label = item.value("label", player.display_name.empty()
@@ -392,8 +400,9 @@ std::optional<EncounterDetail> CombatLogReader::Encounter(
             if (player.display_name.empty()) player.display_name = player.label;
             player.name_origin = item.value("name_origin", player.name_origin.empty()
                 ? std::string{"recorded"} : player.name_origin);
-            player.name_catalog_version = item.value(
-                "name_catalog_version", player.name_catalog_version);
+            player.name_resource_version = item.value(
+                "name_resource_version",
+                item.value("name_catalog_version", player.name_resource_version));
             player.damage = Decimal<std::int64_t>(item.at("damage"));
             player.positive_hits = Decimal<std::uint64_t>(item.at("positive_hits"));
             player.critical_hits = Decimal<std::uint64_t>(item.at("critical_hits"));
@@ -410,8 +419,8 @@ std::optional<EncounterDetail> CombatLogReader::Encounter(
                 player.maximum_source_name = ability->second.technical_name;
                 player.maximum_source_display_name = ability->second.display_name;
                 player.maximum_source_name_origin = ability->second.name_origin;
-                player.maximum_source_catalog_version =
-                    ability->second.catalog_version;
+                player.maximum_source_resource_version =
+                    ability->second.resource_version;
             }
             player_indices.emplace(actor_id, detail.players.size());
             detail.players.push_back(std::move(player));

@@ -59,11 +59,11 @@ void ClosedLogsCanBeBrowsedAndDrilledDown() {
         first.display_damage = 121;
         first.source_name = "SkillA";
         first.source_display_name = "已记录技能";
-        first.source_name_origin = "catalog";
-        first.name_catalog_version = "fixture-v1";
+        first.source_name_origin = "resource";
+        first.name_resource_version = "fixture-v1";
         first.attacker_name = "/Game/Player/player_C";
         first.attacker_display_name = "已记录角色";
-        first.attacker_name_origin = "catalog";
+        first.attacker_name_origin = "resource";
         first.victim_name = "/Game/Enemy/enemy_C";
         Check(repository.Append(LoggedDamage{
             first, 1'700'000'001'250, 1'250'000, true}, error),
@@ -94,8 +94,8 @@ void ClosedLogsCanBeBrowsedAndDrilledDown() {
         row.object_path = first.attacker_name;
         row.label = "player_C";
         row.display_name = "已记录角色";
-        row.name_origin = "catalog";
-        row.name_catalog_version = "fixture-v1";
+        row.name_origin = "resource";
+        row.name_resource_version = "fixture-v1";
         row.damage = 200;
         row.positive_hits = 99;
         row.critical_hits = 99;
@@ -138,9 +138,9 @@ void ClosedLogsCanBeBrowsedAndDrilledDown() {
             "report-local actor ids should resolve back to player handles");
         Check(detail->summary.game_build == "build" &&
                   detail->players[0].display_name == "已记录角色" &&
-                  detail->players[0].name_origin == "catalog" &&
+                  detail->players[0].name_origin == "resource" &&
                   detail->events[0].source_display_name == "已记录技能" &&
-                  detail->events[0].source_name_origin == "catalog",
+                  detail->events[0].source_name_origin == "resource",
             "history should retain report build and recorded display-name priority metadata");
         Check(detail->players.size() == 1 && detail->players[0].positive_hits == 2 &&
                   detail->players[0].critical_hits == 1,

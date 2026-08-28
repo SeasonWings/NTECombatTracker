@@ -134,7 +134,7 @@ CombatStatsEngine::PlayerAggregate& CombatStatsEngine::ConfirmControlledActor(
     const std::string& object_path,
     const std::string& display_name,
     const std::string& name_origin,
-    const std::string& catalog_version) {
+    const std::string& resource_version) {
     const bool resolved = IsResolvedParticipant(object_path);
     const std::string identity = resolved ? PathIdentity(object_path) : HandleIdentity(handle);
     if (resolved) {
@@ -183,8 +183,8 @@ CombatStatsEngine::PlayerAggregate& CombatStatsEngine::ConfirmControlledActor(
                             std::move(source.maximum_source_display_name);
                         destination.maximum_source_name_origin =
                             std::move(source.maximum_source_name_origin);
-                        destination.maximum_source_catalog_version =
-                            std::move(source.maximum_source_catalog_version);
+                        destination.maximum_source_resource_version =
+                            std::move(source.maximum_source_resource_version);
                     }
                     if (destination.first_positive_damage == TimePoint{} ||
                         (source.first_positive_damage != TimePoint{} &&
@@ -209,7 +209,7 @@ CombatStatsEngine::PlayerAggregate& CombatStatsEngine::ConfirmControlledActor(
     }
     aggregate.display_name = aggregate.label;
     aggregate.name_origin = name_origin;
-    aggregate.name_catalog_version = catalog_version;
+    aggregate.name_resource_version = resource_version;
     return aggregate;
 }
 
@@ -235,13 +235,13 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
     if (outgoing) {
         outgoing_player = &ConfirmControlledActor(event.attacker, event.attacker_name,
             event.attacker_display_name, event.attacker_name_origin,
-            event.name_catalog_version);
+            event.name_resource_version);
     }
     PlayerAggregate* incoming_player{};
     if (incoming) {
         incoming_player = &ConfirmControlledActor(event.victim, event.victim_name,
             event.victim_display_name, event.victim_name_origin,
-            event.name_catalog_version);
+            event.name_resource_version);
     }
     if (relevant) last_activity_ = now;
     if (IsPositiveDamage(event)) {
@@ -294,8 +294,8 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
                             ? event.source_name : event.source_display_name;
                     outgoing_player->maximum_source_name_origin =
                         event.source_name_origin;
-                    outgoing_player->maximum_source_catalog_version =
-                        event.name_catalog_version;
+                    outgoing_player->maximum_source_resource_version =
+                        event.name_resource_version;
                 }
                 if (outgoing_player->first_positive_damage == TimePoint{}) {
                     outgoing_player->first_positive_damage = now;
@@ -497,7 +497,7 @@ Snapshot CombatStatsEngine::BuildSnapshot(const TimePoint now) const {
         row.label = aggregate.label;
         row.display_name = aggregate.display_name;
         row.name_origin = aggregate.name_origin;
-        row.name_catalog_version = aggregate.name_catalog_version;
+        row.name_resource_version = aggregate.name_resource_version;
         row.damage = aggregate.damage;
         row.positive_hits = aggregate.positive_hits;
         row.critical_hits = aggregate.critical_hits;
@@ -508,8 +508,8 @@ Snapshot CombatStatsEngine::BuildSnapshot(const TimePoint now) const {
         row.maximum_source_name = aggregate.maximum_source_name;
         row.maximum_source_display_name = aggregate.maximum_source_display_name;
         row.maximum_source_name_origin = aggregate.maximum_source_name_origin;
-        row.maximum_source_catalog_version =
-            aggregate.maximum_source_catalog_version;
+        row.maximum_source_resource_version =
+            aggregate.maximum_source_resource_version;
         row.damage_share = outgoing_damage_ > 0
             ? static_cast<double>(aggregate.damage) * 100.0 /
                 static_cast<double>(outgoing_damage_)

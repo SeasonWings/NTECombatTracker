@@ -75,7 +75,7 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
         event.source_name = "Skill \"A\"";
         event.source_display_name = "技能甲";
         event.source_name_origin = "catalog";
-        event.name_catalog_version = "2026.08.28";
+        event.name_resource_version = "2026.08.28";
         event.attacker_name = "Actor/A";
         event.attacker_display_name = "角色甲";
         event.attacker_name_origin = "catalog";
@@ -100,7 +100,7 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
         player.label = "Actor/A";
         player.display_name = "角色甲";
         player.name_origin = "catalog";
-        player.name_catalog_version = "2026.08.28";
+        player.name_resource_version = "2026.08.28";
         player.damage = 100;
         player.positive_hits = 1;
         player.critical_hits = 1;

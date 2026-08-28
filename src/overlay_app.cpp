@@ -3,7 +3,7 @@
 #include "overlay_control.hpp"
 #include "history_reader.hpp"
 #include "log_worker.hpp"
-#include "name_catalog.hpp"
+#include "resource_name_resolver.hpp"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -173,10 +173,9 @@ struct App {
     std::vector<nte::combat_stats::overlay::DamageSourceSummary> displayed_sources;
     std::vector<nte::combat_stats::overlay::CombatEventDetail> displayed_events;
     std::vector<nte::combat_stats::overlay::HistoricalEncounter> displayed_history;
-    nte::combat_stats::NameCatalog name_catalog;
-    std::filesystem::path name_catalog_path;
-    std::string name_catalog_build;
-    std::string name_catalog_error;
+    nte::combat_stats::ResourceNameResolver name_resolver;
+    std::filesystem::path name_resource_root;
+    std::string name_resource_error;
 };
 
 App g_app;
@@ -461,7 +460,7 @@ void RenderOverlay() {
     std::vector<nte::combat_stats::overlay::CombatEventDetail> live_events;
     std::string status;
     std::string history_error;
-    nte::combat_stats::NameCatalog name_catalog;
+    nte::combat_stats::ResourceNameResolver name_resolver;
     bool connected{};
     {
         std::scoped_lock lock(g_app.snapshot_mutex);
@@ -472,44 +471,44 @@ void RenderOverlay() {
         status = g_app.connection_status;
         history_error = g_app.history_error;
         connected = g_app.connected;
-        name_catalog = g_app.name_catalog;
+        name_resolver = g_app.name_resolver;
     }
     if (history_detail) {
         for (auto& player : history_detail->players) {
-            const auto character = name_catalog.Character(player.object_path);
+            const auto character = name_resolver.ResolveParticipant(player.object_path);
             if (!HasRecordedDisplayName(player.display_name, player.name_origin) &&
-                character.origin == nte::combat_stats::NameOrigin::Catalog) {
+                character.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
                 player.display_name = character.display_name;
                 player.label = character.display_name;
                 player.name_origin = std::string(
-                    nte::combat_stats::NameOriginName(character.origin));
-                player.name_catalog_version = character.catalog_version;
+                    nte::combat_stats::DisplayNameOriginName(character.origin));
+                player.name_resource_version = character.resource_version;
             }
-            const auto source = name_catalog.DamageSource(
+            const auto source = name_resolver.ResolveDamageSource(
                 player.maximum_source_name);
             if (!HasRecordedDisplayName(player.maximum_source_display_name,
                     player.maximum_source_name_origin) &&
-                source.origin == nte::combat_stats::NameOrigin::Catalog) {
+                source.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
                 player.maximum_source_display_name = source.display_name;
             }
         }
         for (auto& event : history_detail->events) {
-            const auto source = name_catalog.DamageSource(event.source);
-            const auto attacker = name_catalog.Character(event.attacker_name);
-            const auto victim = name_catalog.Character(event.victim_name);
+            const auto source = name_resolver.ResolveDamageSource(event.source);
+            const auto attacker = name_resolver.ResolveParticipant(event.attacker_name);
+            const auto victim = name_resolver.ResolveParticipant(event.victim_name);
             if (!HasRecordedDisplayName(event.source_display_name,
                     event.source_name_origin) &&
-                source.origin == nte::combat_stats::NameOrigin::Catalog) {
+                source.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
                 event.source_display_name = source.display_name;
             }
             if (!HasRecordedDisplayName(event.attacker_display_name,
                     event.attacker_name_origin) &&
-                attacker.origin == nte::combat_stats::NameOrigin::Catalog) {
+                attacker.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
                 event.attacker_display_name = attacker.display_name;
             }
             if (!HasRecordedDisplayName(event.victim_display_name,
                     event.victim_name_origin) &&
-                victim.origin == nte::combat_stats::NameOrigin::Catalog) {
+                victim.origin == nte::combat_stats::DisplayNameOrigin::Resource) {
                 event.victim_display_name = victim.display_name;
             }
         }
@@ -637,6 +636,7 @@ void RenderOverlay() {
         }
     }
     if (!g_app.action_status.empty()) target_name = Utf16(g_app.action_status);
+    if (!g_app.name_resource_error.empty()) target_name += L"｜名称资源不可用";
     DrawTextLine(target.Get(), scaled_bold.Get(), accent.Get(), time,
         to_d2d_rect(title_layout.time));
     DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), title,
@@ -1189,13 +1189,6 @@ void LoadHistoryData(const std::stop_token stop) {
         if (load_detail) {
             detail = reader.Encounter(requested_report, requested_encounter, detail_error);
         }
-        nte::combat_stats::NameCatalog detail_catalog;
-        std::string detail_catalog_error;
-        if (detail) {
-            detail_catalog = nte::combat_stats::NameCatalog::Load(
-                g_app.name_catalog_path, detail->summary.game_build,
-                detail_catalog_error);
-        }
         bool definitive_detail_failure{};
         {
             std::scoped_lock lock(g_app.snapshot_mutex);
@@ -1213,9 +1206,6 @@ void LoadHistoryData(const std::stop_token stop) {
                 g_app.requested_report_id == requested_report &&
                 g_app.requested_encounter_id == requested_encounter) {
                 g_app.history_detail = std::move(detail);
-                g_app.name_catalog = std::move(detail_catalog);
-                g_app.name_catalog_build = g_app.history_detail->summary.game_build;
-                g_app.name_catalog_error = std::move(detail_catalog_error);
             } else if (load_detail &&
                 (detail_error == "encounter not found" ||
                  detail_error == "invalid report or encounter id") &&
@@ -1953,12 +1943,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     const DWORD executable_length = GetModuleFileNameW(
         nullptr, executable_path.data(), static_cast<DWORD>(executable_path.size()));
     if (executable_length != 0 && executable_length < executable_path.size()) {
-        g_app.name_catalog_path =
-            std::filesystem::path(executable_path.data()).parent_path() /
-                "names" / "zh-CN.json";
-        g_app.name_catalog = nte::combat_stats::NameCatalog::Load(
-            g_app.name_catalog_path,
-            {}, g_app.name_catalog_error);
+        g_app.name_resource_root =
+            std::filesystem::path(executable_path.data()).parent_path() / "res";
+        g_app.name_resolver = nte::combat_stats::ResourceNameResolver::Load(
+            g_app.name_resource_root, g_app.name_resource_error);
     }
     g_app.port = ParsePort();
     const DWORD host_process_id = ParseHostProcessId();

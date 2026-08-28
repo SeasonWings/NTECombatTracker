@@ -86,7 +86,7 @@ Json PlayerToJson(const PlayerRow& row) {
         {"label", row.label},
         {"display_name", row.display_name},
         {"name_origin", row.name_origin},
-        {"name_catalog_version", row.name_catalog_version},
+        {"name_resource_version", row.name_resource_version},
         {"damage", Decimal(row.damage)},
         {"positive_hits", Decimal(row.positive_hits)},
         {"critical_hits", Decimal(row.critical_hits)},
@@ -100,7 +100,7 @@ Json PlayerToJson(const PlayerRow& row) {
                              {"name", row.maximum_source_name},
                              {"display_name", row.maximum_source_display_name},
                              {"name_origin", row.maximum_source_name_origin},
-                             {"catalog_version", row.maximum_source_catalog_version}}},
+                             {"name_resource_version", row.maximum_source_resource_version}}},
         {"damage_share", row.damage_share},
         {"encounter_dps", row.encounter_dps},
         {"active_dps", row.active_dps},
@@ -123,8 +123,9 @@ PlayerRow PlayerFromJson(const Json& value) {
     row.label = value.at("label").get<std::string>();
     row.display_name = value.value("display_name", row.label);
     row.name_origin = value.value("name_origin", std::string{"technical"});
-    row.name_catalog_version = value.value(
-        "name_catalog_version", std::string{});
+    row.name_resource_version = value.value(
+        "name_resource_version",
+        value.value("name_catalog_version", std::string{}));
     row.damage = ParseDecimal<std::int64_t>(value.at("damage"), "players.damage");
     row.positive_hits = ParseDecimal<std::uint64_t>(
         value.at("positive_hits"), "players.positive_hits");
@@ -154,8 +155,9 @@ PlayerRow PlayerFromJson(const Json& value) {
         "display_name", row.maximum_source_name);
     row.maximum_source_name_origin = ability.value(
         "name_origin", std::string{"technical"});
-    row.maximum_source_catalog_version = ability.value(
-        "catalog_version", std::string{});
+    row.maximum_source_resource_version = ability.value(
+        "name_resource_version",
+        ability.value("catalog_version", std::string{}));
     row.damage_share = value.at("damage_share").get<double>();
     row.encounter_dps = value.at("encounter_dps").get<double>();
     row.active_dps = value.at("active_dps").get<double>();

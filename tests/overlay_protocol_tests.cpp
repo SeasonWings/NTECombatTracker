@@ -55,8 +55,8 @@ NteOverlaySnapshot ExampleSnapshot() {
     player.object_path = "/Game/角色/player_001_C";
     player.label = "角色甲";
     player.display_name = "角色甲";
-    player.name_origin = "catalog";
-    player.name_catalog_version = "2026.08.28";
+    player.name_origin = "resource";
+    player.name_resource_version = "2026.08.28";
     player.damage = 700;
     player.positive_hits = 2;
     player.critical_hits = 1;
@@ -128,7 +128,8 @@ void RoundTripPreservesVersionedNteSnapshot() {
               "ability names must use correct JSON escaping");
         Check(player.display_name == "角色甲" &&
                   player.maximum_source_display_name == "终结技甲" &&
-                  player.name_origin == "catalog",
+                  player.name_origin == "resource" &&
+                  player.name_resource_version == "2026.08.28",
               "optional localized player and source names should round-trip");
         Check(player.incoming_damage == 45 && player.incoming_positive_hits == 3 &&
                   player.maximum_incoming_hit == 20 && player.incoming_share == 100.0,
@@ -141,6 +142,21 @@ void RoundTripPreservesVersionedNteSnapshot() {
                   nte::combat_stats::Handle{91, 2} &&
               parsed->combat.recent_events[0].source_display_name == "技能甲",
           "recent event identifiers should round-trip");
+}
+
+void ParserAcceptsLegacyNameCatalogVersion() {
+    std::string json = nte::combat_stats::SerializeOverlaySnapshot(ExampleSnapshot());
+    const std::string current = "name_resource_version";
+    std::size_t position{};
+    while ((position = json.find(current, position)) != std::string::npos) {
+        json.replace(position, current.size(), "name_catalog_version");
+        position += std::string_view("name_catalog_version").size();
+    }
+    std::string error;
+    const auto parsed = nte::combat_stats::ParseOverlaySnapshot(json, error);
+    Check(parsed.has_value() && error.empty() &&
+              parsed->combat.players[0].name_resource_version == "2026.08.28",
+        "protocol v1 should continue reading the legacy name catalog version field");
 }
 
 void ParserDefaultsMissingOptionalExtensions() {
@@ -271,6 +287,7 @@ int main() {
     ParserRejectsForeignSemantics();
     ParserRejectsMissingRequiredFieldsAndUnsupportedVersions();
     ParserDefaultsMissingOptionalExtensions();
+    ParserAcceptsLegacyNameCatalogVersion();
     DerivedCriticalRateCannotExceedPositiveHits();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";

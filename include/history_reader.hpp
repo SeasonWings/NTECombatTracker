@@ -44,15 +44,15 @@ struct CombatEventDetail {
     std::string source;
     std::string source_display_name;
     std::string source_name_origin;
-    std::string source_catalog_version;
+    std::string source_resource_version;
     std::string attacker_name;
     std::string attacker_display_name;
     std::string attacker_name_origin;
-    std::string attacker_catalog_version;
+    std::string attacker_resource_version;
     std::string victim_name;
     std::string victim_display_name;
     std::string victim_name_origin;
-    std::string victim_catalog_version;
+    std::string victim_resource_version;
 };
 
 struct DamageSourceSummary {

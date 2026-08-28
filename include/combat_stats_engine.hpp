@@ -68,7 +68,7 @@ struct DamageEvent {
     std::string source_name;
     std::string source_display_name;
     std::string source_name_origin;
-    std::string name_catalog_version;
+    std::string name_resource_version;
     std::string attacker_name;
     std::string attacker_display_name;
     std::string attacker_name_origin;
@@ -114,7 +114,7 @@ struct PlayerRow {
     std::string label;
     std::string display_name;
     std::string name_origin;
-    std::string name_catalog_version;
+    std::string name_resource_version;
     std::int64_t damage{};
     std::uint64_t positive_hits{};
     std::uint64_t critical_hits{};
@@ -125,7 +125,7 @@ struct PlayerRow {
     std::string maximum_source_name;
     std::string maximum_source_display_name;
     std::string maximum_source_name_origin;
-    std::string maximum_source_catalog_version;
+    std::string maximum_source_resource_version;
     double damage_share{};
     double encounter_dps{};
     double active_dps{};
@@ -253,7 +253,7 @@ private:
         std::string label;
         std::string display_name;
         std::string name_origin;
-        std::string name_catalog_version;
+        std::string name_resource_version;
         std::int64_t damage{};
         std::uint64_t positive_hits{};
         std::uint64_t critical_hits{};
@@ -264,7 +264,7 @@ private:
         std::string maximum_source_name;
         std::string maximum_source_display_name;
         std::string maximum_source_name_origin;
-        std::string maximum_source_catalog_version;
+        std::string maximum_source_resource_version;
         TimePoint first_positive_damage{};
         TimePoint last_positive_damage{};
         std::vector<TimedDamage> rolling_damage;
@@ -278,7 +278,7 @@ private:
         const std::string& object_path,
         const std::string& display_name,
         const std::string& name_origin,
-        const std::string& catalog_version);
+        const std::string& resource_version);
     void ClearEncounter();
 
     EncounterState state_{EncounterState::Idle};

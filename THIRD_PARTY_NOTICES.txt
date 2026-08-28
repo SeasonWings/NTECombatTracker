@@ -25,3 +25,14 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+nte-dps-toolkit resources
+https://github.com/kongbaiz/nte-dps-toolkit
+
+Source commit: bff9f569ae19fc659b61a3a810407c01be5fc71a
+Packaged asset revision: 5806a02dfdaacb96b8910f2b5389de3acb980fb1
+License: AGPL-3.0-or-later
+
+The packaged res directory contains data, localization, icons, and images
+derived from the resource set above. The corresponding source and license are
+available from the referenced project and commit.

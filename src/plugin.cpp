@@ -1,7 +1,7 @@
 #include "combat_stats_engine.hpp"
 #include "damage_cursor.hpp"
 #include "log_worker.hpp"
-#include "name_catalog.hpp"
+#include "resource_name_resolver.hpp"
 #include "overlay_publish_policy.hpp"
 #include "overlay_protocol.hpp"
 #include "overlay_control.hpp"
@@ -57,6 +57,7 @@ struct RenderState {
     nte::damage_log::LogWorkerStatus log;
     std::string log_root;
     std::string overlay_error;
+    std::string name_resource_error;
 };
 
 struct LogSession {
@@ -113,9 +114,8 @@ struct Context {
     std::string control_status;
     HANDLE manual_end_event{};
     HANDLE plugin_stopping_event{};
-    nte::combat_stats::NameCatalog name_catalog;
-    std::string name_catalog_build;
-    std::string name_catalog_error;
+    nte::combat_stats::ResourceNameResolver name_resolver;
+    std::string name_resource_error;
 } g_context;
 
 NteOverlaySnapshot MakeOverlaySnapshot(
@@ -129,23 +129,17 @@ NteOverlaySnapshot MakeOverlaySnapshot(
     std::uint64_t snapshot_sequence);
 std::optional<std::filesystem::path> PluginDirectory();
 
-void EnsureNameCatalog(const std::string& game_build) {
-    if (g_context.name_catalog_build == game_build &&
-        g_context.name_catalog_error.empty()) return;
+void EnsureNameResources() {
+    if (!g_context.name_resolver.version().empty() &&
+        g_context.name_resource_error.empty()) return;
     const auto directory = PluginDirectory();
     if (!directory) {
-        g_context.name_catalog_error = "插件目录不可用，名称回退到技术路径";
-        g_context.name_catalog = {};
+        g_context.name_resource_error = "插件目录不可用，名称回退到技术路径";
+        g_context.name_resolver = {};
         return;
     }
-    g_context.name_catalog = nte::combat_stats::NameCatalog::Load(
-        *directory / "names" / "zh-CN.json", game_build,
-        g_context.name_catalog_error);
-    if (g_context.name_catalog_error.empty()) {
-        g_context.name_catalog_build = game_build;
-    } else {
-        g_context.name_catalog_build.clear();
-    }
+    g_context.name_resolver = nte::combat_stats::ResourceNameResolver::Load(
+        *directory / "res", g_context.name_resource_error);
 }
 
 bool AppendRange(
@@ -369,7 +363,7 @@ bool OpenEncounterLog(
         session.report_started = now;
         session.report_started_utc_ms = utc_ms;
         const std::string game_build = ResolveBuildId(host);
-        EnsureNameCatalog(game_build);
+        EnsureNameResources();
         if (!g_context.log_worker->Submit(nte::damage_log::ReportOpen{
                 session.report_id, world, utc_ms, game_build,
                 "0.4.0", ResolveRuntimeVersion(host)})) return false;
@@ -931,22 +925,22 @@ void Update(void* context, double) {
                         combat.get(), event.attacker, event.sequence);
                     normalized.victim_name = ResolveParticipantCached(
                         combat.get(), event.victim, event.sequence);
-                    const auto source_display = g_context.name_catalog.DamageSource(
+                    const auto source_display = g_context.name_resolver.ResolveDamageSource(
                         normalized.source_name);
-                    const auto attacker_display = g_context.name_catalog.Character(
+                    const auto attacker_display = g_context.name_resolver.ResolveParticipant(
                         normalized.attacker_name);
-                    const auto victim_display = g_context.name_catalog.Character(
+                    const auto victim_display = g_context.name_resolver.ResolveParticipant(
                         normalized.victim_name);
                     normalized.source_display_name = source_display.display_name;
                     normalized.source_name_origin = std::string(
-                        nte::combat_stats::NameOriginName(source_display.origin));
-                    normalized.name_catalog_version = source_display.catalog_version;
+                        nte::combat_stats::DisplayNameOriginName(source_display.origin));
+                    normalized.name_resource_version = source_display.resource_version;
                     normalized.attacker_display_name = attacker_display.display_name;
                     normalized.attacker_name_origin = std::string(
-                        nte::combat_stats::NameOriginName(attacker_display.origin));
+                        nte::combat_stats::DisplayNameOriginName(attacker_display.origin));
                     normalized.victim_display_name = victim_display.display_name;
                     normalized.victim_name_origin = std::string(
-                        nte::combat_stats::NameOriginName(victim_display.origin));
+                        nte::combat_stats::DisplayNameOriginName(victim_display.origin));
                     if (g_context.engine.AcceptDamage(normalized, now) &&
                         g_context.log_worker &&
                         !g_context.log_session.encounter_id.empty() &&
@@ -1012,6 +1006,7 @@ void Update(void* context, double) {
             report_id, encounter_id, utc_ms, false,
             g_context.overlay_snapshot_sequence));
     next.overlay_error = g_context.overlay_error;
+    next.name_resource_error = g_context.name_resource_error;
     std::scoped_lock lock(g_context.mutex);
     g_context.render = std::move(next);
 }
@@ -1108,6 +1103,10 @@ void DrawOverview(const AnomalyUiServiceV1* ui, const RenderState& render) {
             overlay ? overlay->transport_dropped_messages : 0));
     if (!render.overlay_error.empty()) {
         TextFormat(ui, "Overlay 启动错误：%s", render.overlay_error.c_str());
+    }
+    if (!render.name_resource_error.empty()) {
+        TextFormat(ui, "名称资源：不可用（%s），当前使用技术名称",
+            render.name_resource_error.c_str());
     }
     if (ui->button != nullptr && ui->button(
             ui->user, anomaly::sdk::StringView("重新启动 Overlay"), 0.0F, 0.0F)) {
@@ -1340,7 +1339,7 @@ AnomalyStatusV1 ANOMALY_CALL Start(void* context) {
         g_context.log_worker.reset();
     }
     ResetState();
-    EnsureNameCatalog("unknown");
+    EnsureNameResources();
     CloseControlHandles();
     g_context.manual_end_event = CreateEventW(nullptr, FALSE, FALSE,
         nte::combat_stats::overlay::kManualEndEventName);

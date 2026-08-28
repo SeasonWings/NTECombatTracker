@@ -342,7 +342,7 @@ struct DamageLogRepository::Impl {
         std::string path;
         std::string display_name;
         std::string name_origin;
-        std::string catalog_version;
+        std::string resource_version;
     };
     struct AbilityEntry {
         std::uint32_t ability_id{};
@@ -350,7 +350,7 @@ struct DamageLogRepository::Impl {
         std::string name;
         std::string display_name;
         std::string name_origin;
-        std::string catalog_version;
+        std::string resource_version;
     };
     struct SegmentEntry {
         std::string name;
@@ -525,7 +525,7 @@ struct DamageLogRepository::Impl {
                 Quoted(actor->path.starts_with("Unknown") ? "unknown" : "resolved") +
                 ",\"display_name\":" + Quoted(actor->display_name) +
                 ",\"name_origin\":" + Quoted(actor->name_origin) +
-                ",\"catalog_version\":" + Quoted(actor->catalog_version) + "}\n";
+                ",\"name_resource_version\":" + Quoted(actor->resource_version) + "}\n";
         }
     }
 
@@ -549,7 +549,7 @@ struct DamageLogRepository::Impl {
                 Quoted(ability->name.starts_with("Unknown") ? "unknown" : "resolved") +
                 ",\"display_name\":" + Quoted(ability->display_name) +
                 ",\"name_origin\":" + Quoted(ability->name_origin) +
-                ",\"catalog_version\":" + Quoted(ability->catalog_version) + "}\n";
+                ",\"name_resource_version\":" + Quoted(ability->resource_version) + "}\n";
         }
     }
 
@@ -582,7 +582,7 @@ struct DamageLogRepository::Impl {
 
     std::uint32_t ActorId(const combat_stats::Handle handle, const std::string& path,
         const std::string& display_name, const std::string& name_origin,
-        const std::string& catalog_version, std::string& error) {
+        const std::string& resource_version, std::string& error) {
         auto& report = *active;
         if (const auto found = report.actors.find(handle); found != report.actors.end()) {
             if (found->second.path.starts_with("Unknown") && !path.starts_with("Unknown")) {
@@ -592,7 +592,7 @@ struct DamageLogRepository::Impl {
             if (!display_name.empty() && found->second.display_name != display_name) {
                 found->second.display_name = display_name;
                 found->second.name_origin = name_origin;
-                found->second.catalog_version = catalog_version;
+                found->second.resource_version = resource_version;
                 report.actors_dirty = true;
             }
             if (report.actors_dirty) RebuildActorsContent(report);
@@ -606,7 +606,7 @@ struct DamageLogRepository::Impl {
         }
         const std::uint32_t id = static_cast<std::uint32_t>(report.actors.size() + 1);
         report.actors.emplace(handle, ActorEntry{id, handle, path,
-            display_name, name_origin, catalog_version});
+            display_name, name_origin, resource_version});
         report.actors_dirty = true;
         RebuildActorsContent(report);
         if (AtomicWrite(report.directory / "actors.jsonl",
@@ -616,7 +616,7 @@ struct DamageLogRepository::Impl {
 
     std::uint32_t AbilityId(const std::uint64_t source_id, const std::string& name,
         const std::string& display_name, const std::string& name_origin,
-        const std::string& catalog_version, std::string& error) {
+        const std::string& resource_version, std::string& error) {
         auto& report = *active;
         if (const auto found = report.abilities.find(source_id);
             found != report.abilities.end()) {
@@ -627,7 +627,7 @@ struct DamageLogRepository::Impl {
             if (!display_name.empty() && found->second.display_name != display_name) {
                 found->second.display_name = display_name;
                 found->second.name_origin = name_origin;
-                found->second.catalog_version = catalog_version;
+                found->second.resource_version = resource_version;
                 report.abilities_dirty = true;
             }
             if (report.abilities_dirty) RebuildAbilitiesContent(report);
@@ -641,7 +641,7 @@ struct DamageLogRepository::Impl {
         }
         const std::uint32_t id = static_cast<std::uint32_t>(report.abilities.size() + 1);
         report.abilities.emplace(source_id, AbilityEntry{id, source_id, name,
-            display_name, name_origin, catalog_version});
+            display_name, name_origin, resource_version});
         report.abilities_dirty = true;
         RebuildAbilitiesContent(report);
         if (AtomicWrite(report.directory / "abilities.jsonl",
@@ -844,17 +844,17 @@ bool DamageLogRepository::Append(const LoggedDamage& damage, std::string& error)
     const std::uint32_t attacker_id = impl_->ActorId(
         damage.event.attacker, damage.event.attacker_name,
         damage.event.attacker_display_name, damage.event.attacker_name_origin,
-        damage.event.name_catalog_version, error);
+        damage.event.name_resource_version, error);
     if (!error.empty()) return false;
     const std::uint32_t victim_id = impl_->ActorId(
         damage.event.victim, damage.event.victim_name,
         damage.event.victim_display_name, damage.event.victim_name_origin,
-        damage.event.name_catalog_version, error);
+        damage.event.name_resource_version, error);
     if (!error.empty()) return false;
     const std::uint32_t ability_id = impl_->AbilityId(
         damage.event.source_id, damage.event.source_name,
         damage.event.source_display_name, damage.event.source_name_origin,
-        damage.event.name_catalog_version, error);
+        damage.event.name_resource_version, error);
     if (!error.empty()) return false;
     if (damage.event.final_damage > 0) {
         Impl::AddAggregate(report.actor_outgoing, attacker_id, damage,
@@ -905,7 +905,7 @@ bool DamageLogRepository::Append(const LoggedDamage& damage, std::string& error)
          << ",\"attacker_name_origin\":" << Quoted(damage.event.attacker_name_origin)
          << ",\"victim_display_name\":" << Quoted(damage.event.victim_display_name)
          << ",\"victim_name_origin\":" << Quoted(damage.event.victim_name_origin)
-         << ",\"name_catalog_version\":" << Quoted(damage.event.name_catalog_version)
+         << ",\"name_resource_version\":" << Quoted(damage.event.name_resource_version)
          << ",\"display_damage\":" << Decimal(damage.event.display_damage)
          << ",\"basic_damage\":" << Decimal(damage.event.basic_damage)
          << ",\"final_damage\":" << Decimal(damage.event.final_damage)
@@ -979,7 +979,7 @@ bool DamageLogRepository::EndEncounter(
         const std::string path = player.object_path.empty() ? player.label : player.object_path;
         const std::uint32_t actor_id = impl_->ActorId(player.handle, path,
             player.display_name.empty() ? player.label : player.display_name,
-            player.name_origin, player.name_catalog_version, error);
+            player.name_origin, player.name_resource_version, error);
         if (actor_id == 0 && !error.empty()) return false;
         std::uint32_t ability_id{};
         if (player.maximum_source_id != 0) {
@@ -987,7 +987,7 @@ bool DamageLogRepository::EndEncounter(
                 player.maximum_source_name,
                 player.maximum_source_display_name,
                 player.maximum_source_name_origin,
-                player.maximum_source_catalog_version, error);
+                player.maximum_source_resource_version, error);
             if (ability_id == 0 && !error.empty()) return false;
         }
         controlled_players.push_back({&player, actor_id, ability_id});
@@ -1052,8 +1052,8 @@ bool DamageLogRepository::EndEncounter(
              << ",\"label\":" << Quoted(player.label)
              << ",\"display_name\":" << Quoted(player.display_name)
              << ",\"name_origin\":" << Quoted(player.name_origin)
-             << ",\"name_catalog_version\":"
-             << Quoted(player.name_catalog_version)
+             << ",\"name_resource_version\":"
+             << Quoted(player.name_resource_version)
              << ",\"damage\":" << Decimal(player.damage)
              << ",\"positive_hits\":" << Decimal(player.positive_hits)
              << ",\"critical_hits\":" << Decimal(player.critical_hits)

@@ -92,16 +92,17 @@ function Reset-BuildDirectory {
     New-Item -ItemType Directory -Path $actual -Force | Out-Null
 }
 
-function Test-NameCatalog {
+function Read-StrictJson {
     param([Parameter(Mandatory)] [string]$Path)
-
     $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
     try {
         $content = $strictUtf8.GetString([System.IO.File]::ReadAllBytes($Path))
     } catch {
-        throw "Name catalog must be valid UTF-8: $Path"
+        throw "JSON resource must be valid UTF-8: $Path"
     }
-    $jsonDocument = [System.Text.Json.JsonDocument]::Parse($content)
+    $options = [System.Text.Json.JsonDocumentOptions]::new()
+    $options.MaxDepth = 256
+    $jsonDocument = [System.Text.Json.JsonDocument]::Parse($content, $options)
     function Assert-UniqueJsonProperties {
         param(
             [Parameter(Mandatory)] [System.Text.Json.JsonElement]$Element,
@@ -112,7 +113,7 @@ function Test-NameCatalog {
                 [System.StringComparer]::Ordinal)
             foreach ($property in $Element.EnumerateObject()) {
                 if (-not $seen.Add($property.Name)) {
-                    throw "Duplicate name catalog key '$($property.Name)' at '$JsonPath'."
+                    throw "Duplicate JSON key '$($property.Name)' at '$JsonPath' in '$Path'."
                 }
                 Assert-UniqueJsonProperties -Element $property.Value `
                     -JsonPath "$JsonPath.$($property.Name)"
@@ -130,26 +131,68 @@ function Test-NameCatalog {
     } finally {
         $jsonDocument.Dispose()
     }
-    $catalog = $content | ConvertFrom-Json -AsHashtable
-    if ($catalog.schemaVersion -ne 1 -or $catalog.locale -ne 'zh-CN' -or
-        [string]::IsNullOrWhiteSpace($catalog.catalogVersion)) {
-        throw 'Name catalog schemaVersion, locale, or catalogVersion is invalid.'
+    return $content | ConvertFrom-Json -AsHashtable
+}
+
+function Test-NameResources {
+    param([Parameter(Mandatory)] [string]$Root)
+
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        throw "Name resource directory is unavailable: $Root"
     }
-    if ($null -eq $catalog.builds -or -not $catalog.builds.Contains('default')) {
-        throw 'Name catalog must contain a default build group.'
+    $jsonFiles = Get-ChildItem -LiteralPath $Root -Filter '*.json' -File -Recurse
+    foreach ($jsonFile in $jsonFiles) {
+        $null = Read-StrictJson -Path $jsonFile.FullName
     }
-    foreach ($build in $catalog.builds.GetEnumerator()) {
-        foreach ($categoryName in @('characters', 'damageSources')) {
-            $category = $build.Value[$categoryName]
-            if ($null -eq $category) {
-                throw "Name catalog build '$($build.Key)' lacks '$categoryName'."
-            }
-            foreach ($entry in $category.GetEnumerator()) {
-                if (-not $entry.Key.StartsWith('/') -or
-                    [string]::IsNullOrWhiteSpace([string]$entry.Value)) {
-                    throw "Invalid name catalog entry '$($entry.Key)' in '$categoryName'."
-                }
-            }
+
+    $manifest = Read-StrictJson -Path (Join-Path $Root 'data\asset_manifest.json')
+    if ([string]::IsNullOrWhiteSpace($manifest.assets_git_revision)) {
+        throw 'res/data/asset_manifest.json lacks assets_git_revision.'
+    }
+    $characters = (Read-StrictJson -Path (
+        Join-Path $Root 'data\characters\characters.json')).characters
+    $characterIds = [System.Collections.Generic.HashSet[uint32]]::new()
+    $codenames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in $characters.GetEnumerator()) {
+        [uint32]$characterId = 0
+        if (-not [uint32]::TryParse($entry.Key, [ref]$characterId) -or
+            -not $characterIds.Add($characterId) -or
+            [string]::IsNullOrWhiteSpace($entry.Value.codename) -or
+            -not $codenames.Add([string]$entry.Value.codename) -or
+            [string]::IsNullOrWhiteSpace($entry.Value.name_zh)) {
+            throw "Invalid or duplicate character resource entry: $($entry.Key)"
+        }
+    }
+    $enemies = (Read-StrictJson -Path (
+        Join-Path $Root 'data\enemies\enemies.json')).enemies
+    $enemyIds = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($enemy in $enemies) {
+        if ([string]::IsNullOrWhiteSpace($enemy.config_id) -or
+            -not $enemyIds.Add([string]$enemy.config_id)) {
+            throw "Invalid or duplicate enemy config_id: $($enemy.config_id)"
+        }
+    }
+    $damage = Read-StrictJson -Path (Join-Path $Root 'data\skills\skill_damage.json')
+    $abilityTips = (Read-StrictJson -Path (
+        Join-Path $Root 'data\skills\ability_tips.json')).abilities
+    $semantics = (Read-StrictJson -Path (
+        Join-Path $Root 'data\skills\gameplay_effect_semantics.json')).effects
+    if ($null -eq $damage.Rows -or $null -eq $abilityTips -or $null -eq $semantics) {
+        throw 'GE, GA, or gameplay effect semantic resources have invalid root types.'
+    }
+    foreach ($effect in $semantics.GetEnumerator()) {
+        $semanticAbility = if ($effect.Value.Contains('ability')) {
+            [string]$effect.Value.ability
+        } else { '' }
+        $hasShowParent = $effect.Value.Contains('show_parent_ability')
+        if (-not $damage.Rows.Contains($effect.Key) -or
+            ([string]::IsNullOrWhiteSpace($semanticAbility) -eq $false -and
+             -not $abilityTips.Contains($semanticAbility)) -or
+            ($hasShowParent -and
+             $effect.Value.show_parent_ability -isnot [bool])) {
+            throw "Invalid gameplay effect semantic reference: $($effect.Key)"
         }
     }
 }
@@ -161,7 +204,8 @@ if (-not (Test-Path -LiteralPath $ctest -PathType Leaf)) {
     $ctest = Resolve-Executable -Name 'ctest'
 }
 
-Test-NameCatalog -Path (Join-Path $repositoryRoot 'names\zh-CN.json')
+$resourceRoot = Join-Path $repositoryRoot 'res'
+Test-NameResources -Root $resourceRoot
 
 if ($Incremental) {
     New-Item -ItemType Directory -Path $buildDirectory -Force | Out-Null
@@ -196,6 +240,21 @@ $packageFileList = Join-Path $PSScriptRoot 'package-files.txt'
 $expectedFiles = Get-Content -LiteralPath $packageFileList |
     ForEach-Object { $_.Trim() } |
     Where-Object { $_.Length -ne 0 }
+$packageDirectoryList = Join-Path $PSScriptRoot 'package-directories.txt'
+$sourceRoot = [System.IO.Path]::GetFullPath($repositoryRoot).TrimEnd('\') + '\'
+foreach ($relativeDirectory in (Get-Content -LiteralPath $packageDirectoryList |
+        ForEach-Object { $_.Trim() } | Where-Object { $_.Length -ne 0 })) {
+    $sourceDirectory = Join-Path $repositoryRoot $relativeDirectory
+    $expectedFiles += Get-ChildItem -LiteralPath $sourceDirectory -File -Recurse |
+        ForEach-Object {
+            $fullPath = [System.IO.Path]::GetFullPath($_.FullName)
+            if (-not $fullPath.StartsWith(
+                    $sourceRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Package source is outside the repository: $fullPath"
+            }
+            $fullPath.Substring($sourceRoot.Length).Replace('\', '/')
+        }
+}
 $packageRoot = [System.IO.Path]::GetFullPath($packageDirectory).TrimEnd('\') + '\'
 $actualFiles = Get-ChildItem -LiteralPath $packageDirectory -File -Recurse |
     ForEach-Object {
@@ -211,6 +270,7 @@ $expectedSorted = $expectedFiles | Sort-Object
 if ([string]::Join("`n", $actualFiles) -ne [string]::Join("`n", $expectedSorted)) {
     throw "Package contents differ from package-files.txt. Actual files:`n$($actualFiles -join "`n")"
 }
+Test-NameResources -Root (Join-Path $packageDirectory 'res')
 
 if (-not $SkipValidation) {
     $validator = Resolve-Executable -Name 'anomaly-plugin' -ExplicitPath $AnomalyPluginTool

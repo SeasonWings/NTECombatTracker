@@ -22,7 +22,7 @@ FetchContent_MakeAvailable(nlohmann_json)
 
 add_library(nte_combat_stats_engine STATIC
     src/combat_stats_engine.cpp
-    src/name_catalog.cpp
+    src/resource_name_resolver.cpp
     src/damage_cursor.cpp
     src/damage_log.cpp
     src/log_worker.cpp)
@@ -110,12 +110,16 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME nte_history_reader COMMAND nte_history_reader_tests)
 
-    add_executable(nte_name_catalog_tests tests/name_catalog_tests.cpp)
-    target_link_libraries(nte_name_catalog_tests PRIVATE nte_combat_stats_engine)
+    add_executable(nte_resource_name_resolver_tests
+        tests/resource_name_resolver_tests.cpp)
+    target_link_libraries(nte_resource_name_resolver_tests PRIVATE nte_combat_stats_engine)
+    target_compile_definitions(nte_resource_name_resolver_tests PRIVATE
+        NTE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     if(MSVC)
-        target_compile_options(nte_name_catalog_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+        target_compile_options(nte_resource_name_resolver_tests PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
     endif()
-    add_test(NAME nte_name_catalog COMMAND nte_name_catalog_tests)
+    add_test(NAME nte_resource_name_resolver COMMAND nte_resource_name_resolver_tests)
 endif()
 
 option(NTE_COMBAT_STATS_BUILD_PLUGIN "Build the Anomaly plugin package" ON)
@@ -166,6 +170,21 @@ if(NTE_COMBAT_STATS_BUILD_PLUGIN)
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                     "${package_source}"
                     "${NTE_COMBAT_STATS_PACKAGE_DIR}/${package_file}")
+    endforeach()
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/script/package-directories.txt"
+        NTE_COMBAT_STATS_PACKAGE_DIRECTORIES)
+    foreach(package_directory IN LISTS NTE_COMBAT_STATS_PACKAGE_DIRECTORIES)
+        if(IS_ABSOLUTE "${package_directory}" OR
+            package_directory MATCHES "(^|/)\.\.(/|$)")
+            message(FATAL_ERROR "Invalid package directory: ${package_directory}")
+        endif()
+        if(NOT IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/${package_directory}")
+            message(FATAL_ERROR "Missing package directory: ${package_directory}")
+        endif()
+        list(APPEND NTE_COMBAT_STATS_PACKAGE_COMMANDS
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                    "${CMAKE_CURRENT_SOURCE_DIR}/${package_directory}"
+                    "${NTE_COMBAT_STATS_PACKAGE_DIR}/${package_directory}")
     endforeach()
     add_custom_target(nte_combat_stats_package
         ${NTE_COMBAT_STATS_PACKAGE_COMMANDS}
