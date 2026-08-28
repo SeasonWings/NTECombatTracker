@@ -305,6 +305,25 @@ void DrawTextLine(ID2D1RenderTarget* target, IDWriteTextFormat* format,
         rect, brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
+DWRITE_TEXT_ALIGNMENT DWriteTextAlignment(
+    const nte::combat_stats::overlay::TextAlignment alignment) noexcept {
+    switch (alignment) {
+    case nte::combat_stats::overlay::TextAlignment::Center:
+        return DWRITE_TEXT_ALIGNMENT_CENTER;
+    case nte::combat_stats::overlay::TextAlignment::Trailing:
+        return DWRITE_TEXT_ALIGNMENT_TRAILING;
+    }
+    return DWRITE_TEXT_ALIGNMENT_CENTER;
+}
+
+bool ConfigureTextFormat(
+    IDWriteTextFormat* format,
+    const nte::combat_stats::overlay::TextAlignment alignment) {
+    return SUCCEEDED(format->SetTextAlignment(DWriteTextAlignment(alignment))) &&
+        SUCCEEDED(format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)) &&
+        SUCCEEDED(format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP));
+}
+
 std::wstring CompactNumber(const double value) {
     const double absolute = std::abs(value);
     if (absolute >= 1'000'000'000.0) return std::format(L"{:.2f}B", value / 1'000'000'000.0);
@@ -438,18 +457,30 @@ void RenderOverlay() {
     ComPtr<IDWriteTextFormat> scaled_regular;
     ComPtr<IDWriteTextFormat> scaled_small;
     ComPtr<IDWriteTextFormat> scaled_bold;
-    auto scaled_format = [&](const float size, const DWRITE_FONT_WEIGHT weight,
+    ComPtr<IDWriteTextFormat> scaled_tab;
+    ComPtr<IDWriteTextFormat> scaled_footer;
+    ComPtr<IDWriteTextFormat> scaled_history_icon;
+    const auto text_styles = nte::combat_stats::overlay::OverlayReferenceTextStyles();
+    auto scaled_format = [&](const nte::combat_stats::overlay::TextStyle style,
+                             const DWRITE_FONT_WEIGHT weight,
                              ComPtr<IDWriteTextFormat>& output) {
-        if (FAILED(g_app.render.write->CreateTextFormat(L"Microsoft YaHei UI", nullptr,
+        if (FAILED(g_app.render.write->CreateTextFormat(style.font_family.data(), nullptr,
                 weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                size * scale, L"zh-CN", &output))) return false;
-        output->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        output->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        return true;
+                style.logical_size * scale, L"zh-CN", &output))) return false;
+        return ConfigureTextFormat(output.Get(), style.alignment);
     };
-    if (!scaled_format(14.0F, DWRITE_FONT_WEIGHT_NORMAL, scaled_regular) ||
-        !scaled_format(12.0F, DWRITE_FONT_WEIGHT_NORMAL, scaled_small) ||
-        !scaled_format(14.0F, DWRITE_FONT_WEIGHT_SEMI_BOLD, scaled_bold)) return;
+    if (!scaled_format(text_styles.regular_text,
+            DWRITE_FONT_WEIGHT_NORMAL, scaled_regular) ||
+        !scaled_format(text_styles.small_text,
+            DWRITE_FONT_WEIGHT_NORMAL, scaled_small) ||
+        !scaled_format(text_styles.bold_text,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD, scaled_bold) ||
+        !scaled_format(text_styles.tab_text,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD, scaled_tab) ||
+        !scaled_format(text_styles.footer_text,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD, scaled_footer) ||
+        !scaled_format(text_styles.history_icon_text,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD, scaled_history_icon)) return;
 
     target->BeginDraw();
     target->Clear(D2D1::ColorF(theme.content_background, g_app.settings.opacity));
@@ -463,6 +494,9 @@ void RenderOverlay() {
     const auto add_target = [&](const D2D1_RECT_F rect, const UiAction action,
                                 const std::size_t index = 0) {
         g_app.hit_targets.push_back({rect, action, index});
+    };
+    const auto to_d2d_rect = [](const nte::combat_stats::overlay::ViewRect rect) {
+        return D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom);
     };
     const auto draw_cells = [&](const std::vector<std::wstring>& cells,
                                 const std::vector<float>& weights,
@@ -480,19 +514,18 @@ void RenderOverlay() {
         float x = row.left;
         for (std::size_t index{}; index < cells.size(); ++index) {
             const float next = x + (row.right - row.left) * weights[index] / total;
+            const auto text_rect = nte::combat_stats::overlay::CalculateCellTextRect(
+                {x, row.top, next, row.bottom}, scale,
+                index == 0 ? first_cell_inset : 0.0F);
             DrawTextLine(target.Get(), format, brush, cells[index],
-                D2D1::RectF(x + 6 * scale + (index == 0 ? first_cell_inset : 0.0F),
-                    row.top, next, row.bottom));
+                to_d2d_rect(text_rect));
             x = next;
         }
     };
     const auto title_layout = nte::combat_stats::overlay::CalculateTitleBarLayout(
         layout.width, scale, layout.title_height);
-    const auto to_d2d_rect = [](const nte::combat_stats::overlay::ViewRect rect) {
-        return D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom);
-    };
     const D2D1_RECT_F history_rect = to_d2d_rect(title_layout.history);
-    DrawTextLine(target.Get(), scaled_bold.Get(), accent.Get(), L"◷", history_rect);
+    DrawTextLine(target.Get(), scaled_history_icon.Get(), accent.Get(), L"◷", history_rect);
     add_target(history_rect, UiAction::ToggleHistory);
     const D2D1_RECT_F manual_rect = to_d2d_rect(title_layout.manual_end);
     const bool manual_enabled = g_app.page == ViewPage::Live && snapshot &&
@@ -545,22 +578,23 @@ void RenderOverlay() {
         float top = layout.title_height;
         const bool show_tabs = g_app.page != ViewPage::HistoryList;
         const float content_bottom = layout.height - tab_height;
+        const auto footer_layout = nte::combat_stats::overlay::CalculateFooterLayout(
+            layout.width, layout.height, scale, tab_height,
+            layout.resize_grip, show_tabs);
         target->FillRectangle(D2D1::RectF(0, content_bottom,
             layout.width, layout.height), footer_background.Get());
         if (show_tabs) {
-            const D2D1_RECT_F outgoing = D2D1::RectF(0, content_bottom,
-                58 * scale, layout.height);
-            const D2D1_RECT_F incoming = D2D1::RectF(58 * scale, content_bottom,
-                116 * scale, layout.height);
+            const D2D1_RECT_F outgoing = to_d2d_rect(footer_layout.outgoing_tab);
+            const D2D1_RECT_F incoming = to_d2d_rect(footer_layout.incoming_tab);
             const bool outgoing_active = g_app.settings.active_tab == DataTab::Outgoing;
-            DrawTextLine(target.Get(), scaled_bold.Get(), outgoing_active ? accent.Get() : text.Get(),
+            DrawTextLine(target.Get(), scaled_tab.Get(), outgoing_active ? accent.Get() : text.Get(),
                 L"输出", outgoing);
-            DrawTextLine(target.Get(), scaled_bold.Get(), outgoing_active ? text.Get() : accent.Get(),
+            DrawTextLine(target.Get(), scaled_tab.Get(), outgoing_active ? text.Get() : accent.Get(),
                 L"承伤", incoming);
-            target->DrawLine(D2D1::Point2F(58 * scale, content_bottom),
-                D2D1::Point2F(58 * scale, layout.height), separator.Get(), scale);
-            target->DrawLine(D2D1::Point2F(116 * scale, content_bottom),
-                D2D1::Point2F(116 * scale, layout.height), separator.Get(), scale);
+            target->DrawLine(D2D1::Point2F(outgoing.right, outgoing.top),
+                D2D1::Point2F(outgoing.right, outgoing.bottom), separator.Get(), scale);
+            target->DrawLine(D2D1::Point2F(incoming.right, incoming.top),
+                D2D1::Point2F(incoming.right, incoming.bottom), separator.Get(), scale);
             add_target(outgoing, UiAction::OutgoingTab);
             add_target(incoming, UiAction::IncomingTab);
         }
@@ -581,9 +615,8 @@ void RenderOverlay() {
                 : nte::combat_stats::overlay::FooterPage::Live);
         const std::wstring footer_status =
             nte::combat_stats::overlay::FooterSummary(footer_page, footer_data);
-        DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), footer_status,
-            D2D1::RectF(show_tabs ? 120 * scale : 8 * scale, content_bottom,
-                layout.width - 8 * scale, layout.height));
+        DrawTextLine(target.Get(), scaled_footer.Get(), text.Get(), footer_status,
+            to_d2d_rect(footer_layout.summary));
 
         if (g_app.page == ViewPage::HistoryList) {
             draw_cells({L"时间", L"时长", L"输出", L"承伤", L"DPS", L"结束原因", L"质量"},
@@ -785,9 +818,11 @@ void RenderOverlay() {
                             player.identity_key.empty() ? player.label : player.identity_key);
                     ComPtr<ID2D1SolidColorBrush> glyph;
                     target->CreateSolidColorBrush(D2D1::ColorF(glyph_color, 1.0F), &glyph);
+                    const auto glyph_rect =
+                        nte::combat_stats::overlay::CalculatePlayerGlyphRect(
+                            {rect.left, rect.top, rect.right, rect.bottom}, scale);
                     DrawTextLine(target.Get(), scaled_bold.Get(), glyph.Get(), L"◇",
-                        D2D1::RectF(rect.left + 2 * scale, rect.top,
-                            rect.left + 26 * scale, rect.bottom));
+                        to_d2d_rect(glyph_rect));
                     add_target(rect, UiAction::SelectRow, index);
                 } else if (g_app.drill == DrillLevel::Sources) {
                     const auto& source = g_app.displayed_sources[index];
@@ -830,13 +865,14 @@ void RenderOverlay() {
                         layout.width - 12 * scale, content_bottom));
             }
         }
-        const float grip = 10 * scale;
+        const D2D1_RECT_F grip = to_d2d_rect(footer_layout.resize_grip);
+        const float inset = 2 * scale;
         for (int line{}; line < 3; ++line) {
             const float offset = static_cast<float>(line) * 3 * scale;
-            target->DrawLine(D2D1::Point2F(layout.width - grip + offset,
-                    layout.height - 2 * scale),
-                D2D1::Point2F(layout.width - 2 * scale,
-                    layout.height - grip + offset), muted.Get(), scale);
+            target->DrawLine(D2D1::Point2F(grip.left + inset + offset,
+                    grip.bottom - inset),
+                D2D1::Point2F(grip.right - inset,
+                    grip.top + inset + offset), muted.Get(), scale);
         }
     }
     if (FAILED(target->EndDraw())) return;
@@ -1576,8 +1612,8 @@ bool InitializeRendering() {
             DWRITE_FONT_WEIGHT_SEMI_BOLD, &g_app.render.bold))) return false;
     for (auto* format : {g_app.render.regular.Get(), g_app.render.small_format.Get(),
                          g_app.render.bold.Get()}) {
-        format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        if (!ConfigureTextFormat(format,
+                nte::combat_stats::overlay::TextAlignment::Center)) return false;
     }
     return true;
 }

@@ -60,6 +60,13 @@ struct ReferenceMetrics {
     float footer_height{};
     float resize_grip{};
     float player_name_inset{};
+    float cell_horizontal_padding{};
+    float player_glyph_left{};
+    float player_glyph_right{};
+    float history_icon_font_size{};
+    float footer_tab_width{};
+    float footer_content_gap{};
+    float footer_safe_padding{};
 };
 
 struct ViewRect {
@@ -77,6 +84,30 @@ struct TitleBarLayout {
     ViewRect target;
     ViewRect collapse;
     ViewRect menu;
+};
+
+enum class TextAlignment : std::uint8_t { Center, Trailing };
+
+struct TextStyle {
+    std::wstring_view font_family;
+    float logical_size{};
+    TextAlignment alignment{TextAlignment::Center};
+};
+
+struct OverlayTextStyles {
+    TextStyle regular_text;
+    TextStyle small_text;
+    TextStyle bold_text;
+    TextStyle tab_text;
+    TextStyle footer_text;
+    TextStyle history_icon_text;
+};
+
+struct FooterLayout {
+    ViewRect outgoing_tab;
+    ViewRect incoming_tab;
+    ViewRect summary;
+    ViewRect resize_grip;
 };
 
 struct SummaryColumn {
@@ -141,8 +172,20 @@ enum class HitRegion : std::uint8_t {
     bool locked) noexcept;
 [[nodiscard]] ReferenceTheme OverlayReferenceTheme() noexcept;
 [[nodiscard]] ReferenceMetrics OverlayReferenceMetrics() noexcept;
+[[nodiscard]] OverlayTextStyles OverlayReferenceTextStyles() noexcept;
 [[nodiscard]] TitleBarLayout CalculateTitleBarLayout(
     float width, float scale, float title_height) noexcept;
+[[nodiscard]] ViewRect CalculateCellTextRect(
+    ViewRect cell, float scale, float leading_content_inset) noexcept;
+[[nodiscard]] ViewRect CalculatePlayerGlyphRect(
+    ViewRect cell, float scale) noexcept;
+[[nodiscard]] FooterLayout CalculateFooterLayout(
+    float width,
+    float height,
+    float scale,
+    float footer_height,
+    float resize_grip,
+    bool show_tabs) noexcept;
 [[nodiscard]] std::uint32_t StablePlayerColor(std::string_view identity) noexcept;
 [[nodiscard]] double PlayerBarFraction(
     std::int64_t damage, std::int64_t maximum_damage) noexcept;

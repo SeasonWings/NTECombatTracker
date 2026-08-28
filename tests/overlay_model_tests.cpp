@@ -103,6 +103,50 @@ void ReferenceVisualModelIsDeterministic() {
           "title controls should use the immutable reference layout");
 }
 
+void TextAndFooterLayoutMatchTheOverlayContract() {
+    const auto styles = OverlayReferenceTextStyles();
+    Check(styles.regular_text.alignment == TextAlignment::Center &&
+              styles.small_text.alignment == TextAlignment::Center &&
+              styles.bold_text.alignment == TextAlignment::Center &&
+              styles.tab_text.alignment == TextAlignment::Center,
+          "cell, title, breadcrumb, and tab text should be centered");
+    Check(styles.footer_text.alignment == TextAlignment::Trailing,
+          "footer encounter summary should be right aligned");
+    Check(styles.history_icon_text.alignment == TextAlignment::Center &&
+              styles.history_icon_text.logical_size == 20.0F &&
+              styles.history_icon_text.font_family == L"Segoe UI Symbol",
+          "history icon should use a centered 20 pixel symbol style");
+
+    const ViewRect cell{0.0F, 46.0F, 170.0F, 74.0F};
+    const auto centered = CalculateCellTextRect(cell, 1.0F, 0.0F);
+    Check(centered.left == 6.0F && centered.right == 164.0F &&
+              (centered.left + centered.right) / 2.0F == 85.0F,
+          "ordinary cells should use symmetric horizontal padding");
+    const auto player_name = CalculateCellTextRect(cell, 1.0F, PlayerNameInset(1.0F));
+    const auto glyph = CalculatePlayerGlyphRect(cell, 1.0F);
+    Check(glyph.left == 2.0F && glyph.right == 26.0F &&
+              player_name.left == 34.0F && glyph.right < player_name.left,
+          "player glyph and centered player name should not overlap");
+
+    const auto footer = CalculateFooterLayout(
+        420.0F, 180.0F, 1.0F, 32.0F, 12.0F, true);
+    Check(footer.outgoing_tab.left == 0.0F && footer.outgoing_tab.right == 58.0F &&
+              footer.incoming_tab.left == 58.0F && footer.incoming_tab.right == 116.0F,
+          "minimum-width footer should preserve both tabs");
+    Check(footer.summary.left == 120.0F && footer.summary.right == 404.0F &&
+              footer.summary.right < footer.resize_grip.left,
+          "footer summary should extend to the right safe margin without covering resize");
+
+    for (const float scale : {1.0F, 1.25F, 1.5F}) {
+        const auto scaled = CalculateFooterLayout(
+            420.0F * scale, 180.0F * scale, scale,
+            32.0F * scale, 12.0F * scale, true);
+        Check(scaled.incoming_tab.right <= scaled.summary.left &&
+                  scaled.summary.right < scaled.resize_grip.left,
+              "scaled footer tabs, summary, and resize grip should not overlap");
+    }
+}
+
 void HitTestingRespectsLockAndResizeGrip() {
     const auto layout = CalculateLayout(520.0F, 220.0F, 1.0F, false, 2);
     Check(HitTest(layout, 100.0F, 20.0F, false) == HitRegion::Title,
@@ -150,5 +194,6 @@ int main() {
     HitTestingRespectsLockAndResizeGrip();
     WindowExtentPreservesLogicalSizeAcrossDpiAndUiScale();
     ReferenceVisualModelIsDeterministic();
+    TextAndFooterLayoutMatchTheOverlayContract();
     std::cout << "All overlay model tests passed\n";
 }

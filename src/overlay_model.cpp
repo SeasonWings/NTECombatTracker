@@ -80,7 +80,23 @@ ReferenceTheme OverlayReferenceTheme() noexcept {
 }
 
 ReferenceMetrics OverlayReferenceMetrics() noexcept {
-    return {46.0F, 28.0F, 30.0F, 32.0F, 12.0F, 28.0F};
+    return {
+        46.0F, 28.0F, 30.0F, 32.0F, 12.0F, 28.0F,
+        6.0F, 2.0F, 26.0F, 20.0F, 58.0F, 4.0F, 4.0F,
+    };
+}
+
+OverlayTextStyles OverlayReferenceTextStyles() noexcept {
+    const auto metrics = OverlayReferenceMetrics();
+    constexpr std::wstring_view ui_font = L"Microsoft YaHei UI";
+    return {
+        {ui_font, 14.0F, TextAlignment::Center},
+        {ui_font, 12.0F, TextAlignment::Center},
+        {ui_font, 14.0F, TextAlignment::Center},
+        {ui_font, 14.0F, TextAlignment::Center},
+        {ui_font, 14.0F, TextAlignment::Trailing},
+        {L"Segoe UI Symbol", metrics.history_icon_font_size, TextAlignment::Center},
+    };
 }
 
 TitleBarLayout CalculateTitleBarLayout(
@@ -100,6 +116,61 @@ TitleBarLayout CalculateTitleBarLayout(
             safe_width - 34 * safe_scale, safe_height - 4 * safe_scale},
         {safe_width - 32 * safe_scale, 4 * safe_scale,
             safe_width - 4 * safe_scale, safe_height - 4 * safe_scale},
+    };
+}
+
+ViewRect CalculateCellTextRect(
+    const ViewRect cell,
+    const float scale,
+    const float leading_content_inset) noexcept {
+    const auto metrics = OverlayReferenceMetrics();
+    const float safe_scale = std::clamp(scale, 0.5F, 4.0F);
+    const float padding = metrics.cell_horizontal_padding * safe_scale;
+    const float left = cell.left + padding + std::max(0.0F, leading_content_inset);
+    const float right = std::max(left, cell.right - padding);
+    return {left, cell.top, right, cell.bottom};
+}
+
+ViewRect CalculatePlayerGlyphRect(
+    const ViewRect cell,
+    const float scale) noexcept {
+    const auto metrics = OverlayReferenceMetrics();
+    const float safe_scale = std::clamp(scale, 0.5F, 4.0F);
+    return {
+        cell.left + metrics.player_glyph_left * safe_scale,
+        cell.top,
+        cell.left + metrics.player_glyph_right * safe_scale,
+        cell.bottom,
+    };
+}
+
+FooterLayout CalculateFooterLayout(
+    const float width,
+    const float height,
+    const float scale,
+    const float footer_height,
+    const float resize_grip,
+    const bool show_tabs) noexcept {
+    const auto metrics = OverlayReferenceMetrics();
+    const float safe_scale = std::clamp(scale, 0.5F, 4.0F);
+    const float safe_width = std::max(0.0F, width);
+    const float safe_height = std::max(0.0F, height);
+    const float safe_footer_height = std::max(0.0F, footer_height);
+    const float safe_resize_grip = std::max(0.0F, resize_grip);
+    const float top = std::max(0.0F, safe_height - safe_footer_height);
+    const float tab_width = metrics.footer_tab_width * safe_scale;
+    const float summary_left = show_tabs
+        ? 2.0F * tab_width + metrics.footer_content_gap * safe_scale
+        : 2.0F * metrics.footer_safe_padding * safe_scale;
+    const float summary_right = std::max(summary_left,
+        safe_width - safe_resize_grip - metrics.footer_safe_padding * safe_scale);
+    return {
+        show_tabs ? ViewRect{0.0F, top, tab_width, safe_height} : ViewRect{},
+        show_tabs ? ViewRect{tab_width, top, 2.0F * tab_width, safe_height} : ViewRect{},
+        {summary_left, top, summary_right, safe_height},
+        {std::max(0.0F, safe_width - safe_resize_grip),
+            std::max(0.0F, safe_height - safe_resize_grip),
+            safe_width, safe_height},
     };
 }
 
