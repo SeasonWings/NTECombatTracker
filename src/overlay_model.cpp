@@ -187,6 +187,23 @@ std::uint32_t StablePlayerColor(const std::string_view identity) noexcept {
     return palette[hash % palette.size()];
 }
 
+std::uint32_t PlayerDisplayColor(
+    const std::optional<std::uint32_t> attribute_color,
+    const std::string_view identity) noexcept {
+    return attribute_color.value_or(StablePlayerColor(identity));
+}
+
+std::uint32_t ResolvePlayerDisplayColor(
+    const PlayerRow& player,
+    const ResourceNameResolver& resolver,
+    const AttributeColorMap& colors) {
+    const auto character = resolver.ResolveParticipant(player.object_path);
+    const auto identity = player.identity_key.empty()
+        ? std::string_view(player.label)
+        : std::string_view(player.identity_key);
+    return PlayerDisplayColor(colors.Find(character.attribute), identity);
+}
+
 double PlayerBarFraction(
     const std::int64_t damage,
     const std::int64_t maximum_damage) noexcept {

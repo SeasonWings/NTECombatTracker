@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -75,6 +76,11 @@ void ReferenceVisualModelIsDeterministic() {
     const auto other = StablePlayerColor("path:/Game/Player/player_b_C");
     Check(first == repeated && first != other,
           "player identity should produce a stable palette color");
+    Check(PlayerDisplayColor(0x699A87U, "path:/Game/Player/player_a_C") ==
+              0x699A87U,
+          "a resolved attribute color should override the identity palette");
+    Check(PlayerDisplayColor(std::nullopt, "path:/Game/Player/player_a_C") == first,
+          "a missing attribute color should retain the stable identity fallback");
     Check(std::abs(PlayerBarFraction(250, 500) - 0.5) < 0.0001 &&
               PlayerBarFraction(800, 500) == 1.0 && PlayerBarFraction(10, 0) == 0.0,
           "damage bars should be normalized to the highest visible damage");
@@ -101,6 +107,32 @@ void ReferenceVisualModelIsDeterministic() {
               title.target.right == 494.0F && title.collapse.left == 496.0F &&
               title.menu.right == 556.0F,
           "title controls should use the immutable reference layout");
+}
+
+void LiveAndHistoricalRowsResolveTheSameAttributeColor() {
+    std::string resource_error;
+    const auto resolver = ResourceNameResolver::Load(
+        std::filesystem::path(NTE_TEST_SOURCE_DIR) / "res", resource_error);
+    std::string color_error;
+    const auto colors = AttributeColorMap::Load(
+        std::filesystem::path(NTE_TEST_SOURCE_DIR) / "dict/attribute_colors.json",
+        color_error);
+    Check(resource_error.empty() && color_error.empty(),
+        "repository appearance resources should load for row color resolution");
+
+    PlayerRow live;
+    live.object_path = "/Game/NTE/Characters/player_076_shinku_C";
+    live.identity_key = "path:/Game/NTE/Characters/player_076_shinku_C";
+    live.label = "真红";
+    PlayerRow historical = live;
+    historical.identity_key = "recorded:historical-row";
+    historical.label = "recorded-name";
+
+    const auto live_color = ResolvePlayerDisplayColor(live, resolver, colors);
+    const auto historical_color = ResolvePlayerDisplayColor(
+        historical, resolver, colors);
+    Check(live_color == 0x699A87U && historical_color == live_color,
+        "live and historical rows for one character should share its attribute color");
 }
 
 void TextAndFooterLayoutMatchTheOverlayContract() {
@@ -246,6 +278,7 @@ int main() {
     NavigationSurvivesRefreshesWithinTheSameEncounter();
     WindowExtentPreservesLogicalSizeAcrossDpiAndUiScale();
     ReferenceVisualModelIsDeterministic();
+    LiveAndHistoricalRowsResolveTheSameAttributeColor();
     TextAndFooterLayoutMatchTheOverlayContract();
     std::cout << "All overlay model tests passed\n";
 }

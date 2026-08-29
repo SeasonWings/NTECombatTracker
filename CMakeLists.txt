@@ -21,6 +21,7 @@ FetchContent_Declare(nlohmann_json
 FetchContent_MakeAvailable(nlohmann_json)
 
 add_library(nte_combat_stats_engine STATIC
+    src/attribute_color_map.cpp
     src/combat_stats_engine.cpp
     src/resource_name_resolver.cpp
     src/damage_cursor.cpp
@@ -91,6 +92,8 @@ if(BUILD_TESTING)
 
     add_executable(nte_overlay_model_tests tests/overlay_model_tests.cpp)
     target_link_libraries(nte_overlay_model_tests PRIVATE nte_overlay_model)
+    target_compile_definitions(nte_overlay_model_tests PRIVATE
+        NTE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     if(MSVC)
         target_compile_options(nte_overlay_model_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
     endif()
@@ -120,6 +123,17 @@ if(BUILD_TESTING)
             /W4 /permissive- /EHsc /utf-8)
     endif()
     add_test(NAME nte_resource_name_resolver COMMAND nte_resource_name_resolver_tests)
+
+    add_executable(nte_attribute_color_map_tests
+        tests/attribute_color_map_tests.cpp)
+    target_link_libraries(nte_attribute_color_map_tests PRIVATE nte_combat_stats_engine)
+    target_compile_definitions(nte_attribute_color_map_tests PRIVATE
+        NTE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    if(MSVC)
+        target_compile_options(nte_attribute_color_map_tests PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME nte_attribute_color_map COMMAND nte_attribute_color_map_tests)
 endif()
 
 option(NTE_COMBAT_STATS_BUILD_PLUGIN "Build the Anomaly plugin package" ON)

@@ -222,6 +222,24 @@ function Test-NameResources {
     }
 }
 
+function Test-AttributeColorDictionary {
+    param([Parameter(Mandatory)] [string]$Root)
+
+    $path = Join-Path $Root 'dict\attribute_colors.json'
+    $colors = Read-StrictJson -Path $path
+    $requiredAttributes = @('灵', '相', '暗', '光', '魂', '咒')
+    if ($colors.Count -ne $requiredAttributes.Count) {
+        throw 'dict/attribute_colors.json must contain exactly six attributes.'
+    }
+    foreach ($attribute in $requiredAttributes) {
+        if (-not $colors.Contains($attribute) -or
+            $colors[$attribute] -isnot [string] -or
+            $colors[$attribute] -notmatch '^#[0-9A-Fa-f]{6}$') {
+            throw "Invalid attribute color for '$attribute' in dict/attribute_colors.json."
+        }
+    }
+}
+
 $visualStudioCMake = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
 $cmake = Resolve-Executable -Name 'cmake' -FallbackPath $visualStudioCMake
 $ctest = Join-Path (Split-Path -Parent $cmake) 'ctest.exe'
@@ -231,6 +249,7 @@ if (-not (Test-Path -LiteralPath $ctest -PathType Leaf)) {
 
 $resourceRoot = Join-Path $repositoryRoot 'res'
 Test-NameResources -Root $resourceRoot
+Test-AttributeColorDictionary -Root $repositoryRoot
 
 if ($Incremental) {
     New-Item -ItemType Directory -Path $buildDirectory -Force | Out-Null
@@ -296,6 +315,7 @@ if ([string]::Join("`n", $actualFiles) -ne [string]::Join("`n", $expectedSorted)
     throw "Package contents differ from package-files.txt. Actual files:`n$($actualFiles -join "`n")"
 }
 Test-NameResources -Root (Join-Path $packageDirectory 'res')
+Test-AttributeColorDictionary -Root $packageDirectory
 
 if (-not $SkipValidation) {
     $validator = Resolve-Executable -Name 'anomaly-plugin' -ExplicitPath $AnomalyPluginTool

@@ -28,8 +28,9 @@ void RepositoryResourcesResolveSdkTechnicalPaths() {
     const auto shinku = resolver.ResolveParticipant(
         "/Game/NTE/Characters/player_076_shinku_C");
     Check(shinku.display_name == "真红" && shinku.character_id == 1076u &&
+              shinku.attribute == "光" &&
               shinku.origin == nte::combat_stats::DisplayNameOrigin::Resource,
-        "player number and codename should resolve 真红");
+        "player number and codename should resolve 真红 with its attribute");
     Check(resolver.ResolveParticipant("Player_075_Oneiroi_C").display_name == "伊洛伊",
         "participant matching should be case-insensitive");
     Check(resolver.ResolveParticipant("Player_051_Female_C").display_name == "「零」",
@@ -105,7 +106,7 @@ void CorruptAndAmbiguousResourcesDegradeSafely() {
     {
         std::ofstream characters(root / "data/characters/characters.json",
             std::ios::binary | std::ios::trunc);
-        characters << R"({"characters":{"1001":{"codename":"Shared","name_zh":"甲"},"1002":{"codename":"shared","name_zh":"乙"}}})";
+        characters << R"({"characters":{"1001":{"attribute":"灵","codename":"Shared","name_zh":"甲"},"1002":{"attribute":"相","codename":"shared","name_zh":"乙"}}})";
     }
     std::string error;
     auto resolver = nte::combat_stats::ResourceNameResolver::Load(root, error);
@@ -116,6 +117,19 @@ void CorruptAndAmbiguousResourcesDegradeSafely() {
     Check(resolver.ResolveDamageSource("Default__GE-Bad-Path_C").origin ==
               nte::combat_stats::DisplayNameOrigin::Technical,
         "malformed GE paths should use technical-name fallback");
+
+    {
+        std::ofstream characters(root / "data/characters/characters.json",
+            std::ios::binary | std::ios::trunc);
+        characters << R"({"characters":{"1001":{"codename":"NoAttribute","name_zh":"无属性"}}})";
+    }
+    resolver = nte::combat_stats::ResourceNameResolver::Load(root, error);
+    const auto without_attribute = resolver.ResolveParticipant(
+        "Player_001_NoAttribute_C");
+    Check(error.empty() && without_attribute.display_name == "无属性" &&
+              without_attribute.attribute.empty() &&
+              without_attribute.origin == nte::combat_stats::DisplayNameOrigin::Resource,
+        "a missing character attribute should preserve name resolution for color fallback");
 
     {
         std::ofstream abilities(root / "data/skills/ability_tips.json",

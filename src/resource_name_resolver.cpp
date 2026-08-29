@@ -16,6 +16,7 @@ struct CharacterEntry {
     std::uint32_t id{};
     std::string codename;
     std::string display_name;
+    std::string attribute;
 };
 
 enum class ParentAbilityPolicy { SkillDamage, Semantic, Hidden };
@@ -138,9 +139,11 @@ ResourceNameResolver ResourceNameResolver::Load(
             CharacterEntry entry{
                 static_cast<std::uint32_t>(parsed),
                 value.at("codename").get<std::string>(),
-                value.at("name_zh").get<std::string>()};
+                value.at("name_zh").get<std::string>(),
+                value.value("attribute", std::string{})};
             if (entry.codename.empty() || entry.display_name.empty()) {
-                throw std::runtime_error("character codename or Chinese name is empty: " + id_text);
+                throw std::runtime_error(
+                    "character codename or Chinese name is empty: " + id_text);
             }
             entries->character_ids_by_codename[Lower(entry.codename)].push_back(entry.id);
             if (!entries->characters_by_id.emplace(entry.id, std::move(entry)).second) {
@@ -227,6 +230,7 @@ ResolvedParticipantName ResourceNameResolver::ResolveParticipant(
                     found != entries_->characters_by_id.end() &&
                     Lower(found->second.codename) == Lower(codename)) {
                     result.display_name = found->second.display_name;
+                    result.attribute = found->second.attribute;
                     result.character_id = found->second.id;
                     result.origin = DisplayNameOrigin::Resource;
                     return result;
@@ -235,6 +239,7 @@ ResolvedParticipantName ResourceNameResolver::ResolveParticipant(
                     found != entries_->character_ids_by_codename.end() && found->second.size() == 1) {
                     const auto& character = entries_->characters_by_id.at(found->second.front());
                     result.display_name = character.display_name;
+                    result.attribute = character.attribute;
                     result.character_id = character.id;
                     result.origin = DisplayNameOrigin::Resource;
                     return result;

@@ -1,9 +1,12 @@
 #pragma once
 
+#include "attribute_color_map.hpp"
 #include "overlay_protocol.hpp"
+#include "resource_name_resolver.hpp"
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -210,6 +213,13 @@ void ReconcileLiveNavigation(
     float resize_grip,
     bool show_tabs) noexcept;
 [[nodiscard]] std::uint32_t StablePlayerColor(std::string_view identity) noexcept;
+[[nodiscard]] std::uint32_t PlayerDisplayColor(
+    std::optional<std::uint32_t> attribute_color,
+    std::string_view identity) noexcept;
+[[nodiscard]] std::uint32_t ResolvePlayerDisplayColor(
+    const PlayerRow& player,
+    const ResourceNameResolver& resolver,
+    const AttributeColorMap& colors);
 [[nodiscard]] double PlayerBarFraction(
     std::int64_t damage, std::int64_t maximum_damage) noexcept;
 [[nodiscard]] const std::array<SummaryColumn, 6>& OutgoingSummaryColumns() noexcept;

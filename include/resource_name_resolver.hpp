@@ -17,6 +17,7 @@ enum class DisplayNameOrigin { Resource, Technical, Unknown };
 struct ResolvedParticipantName {
     std::string technical_name;
     std::string display_name;
+    std::string attribute;
     DisplayNameOrigin origin{DisplayNameOrigin::Unknown};
     std::string resource_version;
     std::optional<std::uint32_t> character_id;

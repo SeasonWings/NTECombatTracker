@@ -1,6 +1,7 @@
+#include "attribute_color_map.hpp"
+#include "overlay_control.hpp"
 #include "overlay_model.hpp"
 #include "overlay_protocol.hpp"
-#include "overlay_control.hpp"
 #include "history_reader.hpp"
 #include "log_worker.hpp"
 #include "resource_name_resolver.hpp"
@@ -174,8 +175,10 @@ struct App {
     std::vector<nte::combat_stats::overlay::CombatEventDetail> displayed_events;
     std::vector<nte::combat_stats::overlay::HistoricalEncounter> displayed_history;
     nte::combat_stats::ResourceNameResolver name_resolver;
+    nte::combat_stats::AttributeColorMap attribute_colors;
     std::filesystem::path name_resource_root;
     std::string name_resource_error;
+    std::string attribute_color_error;
 };
 
 App g_app;
@@ -655,6 +658,7 @@ void RenderOverlay() {
     }
     if (!g_app.action_status.empty()) target_name = Utf16(g_app.action_status);
     if (!g_app.name_resource_error.empty()) target_name += L"｜名称资源不可用";
+    if (!g_app.attribute_color_error.empty()) target_name += L"｜属性颜色不可用";
     DrawTextLine(target.Get(), scaled_bold.Get(), accent.Get(), time,
         to_d2d_rect(title_layout.time));
     DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), title,
@@ -885,8 +889,11 @@ void RenderOverlay() {
                 const D2D1_RECT_F rect = D2D1::RectF(0, top + row * row_height,
                     layout.width, top + (row + 1) * row_height);
                 const std::size_t target_index = g_app.hit_targets.size();
+                std::optional<std::uint32_t> player_color;
                 if (g_app.drill == DrillLevel::Players) {
                     const auto& player = g_app.displayed_players[index];
+                    player_color = nte::combat_stats::overlay::ResolvePlayerDisplayColor(
+                        player, g_app.name_resolver, g_app.attribute_colors);
                     const std::int64_t damage = g_app.settings.active_tab == DataTab::Outgoing
                         ? player.damage : player.incoming_damage;
                     const float fraction = static_cast<float>(
@@ -894,8 +901,7 @@ void RenderOverlay() {
                             damage, maximum_player_damage));
                     ComPtr<ID2D1SolidColorBrush> player_bar;
                     target->CreateSolidColorBrush(D2D1::ColorF(
-                        nte::combat_stats::overlay::StablePlayerColor(
-                            player.identity_key.empty() ? player.label : player.identity_key),
+                        *player_color,
                         0.78F), &player_bar);
                     target->FillRectangle(D2D1::RectF(rect.left, rect.top,
                         rect.left + (rect.right - rect.left) * fraction, rect.bottom),
@@ -937,11 +943,9 @@ void RenderOverlay() {
                         scaled_regular.Get(), text.Get(),
                         false,
                         nte::combat_stats::overlay::PlayerNameInset(scale));
-                    const std::uint32_t glyph_color =
-                        nte::combat_stats::overlay::StablePlayerColor(
-                            player.identity_key.empty() ? player.label : player.identity_key);
                     ComPtr<ID2D1SolidColorBrush> glyph;
-                    target->CreateSolidColorBrush(D2D1::ColorF(glyph_color, 1.0F), &glyph);
+                    target->CreateSolidColorBrush(
+                        D2D1::ColorF(*player_color, 1.0F), &glyph);
                     const auto glyph_rect =
                         nte::combat_stats::overlay::CalculatePlayerGlyphRect(
                             {rect.left, rect.top, rect.right, rect.bottom}, scale);
@@ -1966,6 +1970,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             std::filesystem::path(executable_path.data()).parent_path() / "res";
         g_app.name_resolver = nte::combat_stats::ResourceNameResolver::Load(
             g_app.name_resource_root, g_app.name_resource_error);
+        g_app.attribute_colors = nte::combat_stats::AttributeColorMap::Load(
+            std::filesystem::path(executable_path.data()).parent_path() /
+                "dict/attribute_colors.json",
+            g_app.attribute_color_error);
     }
     g_app.port = ParsePort();
     const DWORD host_process_id = ParseHostProcessId();
