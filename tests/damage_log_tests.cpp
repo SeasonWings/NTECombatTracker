@@ -237,6 +237,79 @@ void ClosedEncounterProducesRecoverableJsonlReport() {
     std::filesystem::remove_all(root, ignored);
 }
 
+void ReusedSourceIdCreatesDistinctAbilityDictionaryEntries() {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto root = std::filesystem::temp_directory_path() /
+        ("nte-damage-source-reuse-test-" + std::to_string(nonce));
+    const std::string report_id = "22222222-3333-4444-8555-666666666666";
+    const std::string encounter_id = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    const Handle world{12, 3};
+    DamageLogRepository repository(root);
+    std::string error;
+    Check(repository.Recover(error), "source reuse fixture repository should initialize");
+    Check(repository.BeginReport(ReportOpen{
+              report_id, world, 1'700'000'100'000, "nte-build-test"}, error),
+        "source reuse fixture report should open");
+    Check(repository.BeginEncounter(EncounterOpen{
+              encounter_id, 1'700'000'100'100, 100'000}, error),
+        "source reuse fixture encounter should open");
+
+    DamageEvent first;
+    first.sequence = 1;
+    first.world = world;
+    first.attacker = {20, 3};
+    first.victim = {21, 3};
+    first.source_id = 0x8000000000000005ULL;
+    first.final_damage = 100;
+    first.source_name = "GE_Player_Shinku_Melee1_1_Damage";
+    first.source_display_name = "普通攻击：特种格斗术";
+    first.source_name_origin = "resource";
+    first.attacker_name = "Player";
+    first.victim_name = "Enemy";
+    Check(repository.Append(LoggedDamage{
+              first, 1'700'000'100'200, 200'000, true}, error),
+        "first source generation should append");
+
+    auto second = first;
+    second.sequence = 2;
+    second.final_damage = 200;
+    second.source_name = "GE_Player_Sagiri_Melee1_Damage";
+    second.source_display_name = "鬼郎丸挥击";
+    Check(repository.Append(LoggedDamage{
+              second, 1'700'000'100'300, 300'000, true}, error),
+        "reused source id with a new path should append");
+
+    Check(repository.EndEncounter(EncounterClose{encounter_id, "manual_end",
+              1'700'000'101'000, 1'000'000, 300, 0, 300.0, 1.0, {}}, error),
+        "source reuse fixture encounter should close");
+    Check(repository.CloseReport(ReportClose{
+              "plugin_stop", 1'700'000'101'100, false}, error),
+        "source reuse fixture report should close");
+
+    const auto report = root / "reports" / report_id;
+    const std::string abilities = ReadAll(report / "abilities.jsonl");
+    const std::string events = ReadAll(report / "events-000001.jsonl");
+    const std::string encounters = ReadAll(report / "encounters.jsonl");
+    Check(abilities.find("\"ability_id\":1") != std::string::npos &&
+              abilities.find("\"ability_id\":2") != std::string::npos &&
+              abilities.find("GE_Player_Shinku_Melee1_1_Damage") != std::string::npos &&
+              abilities.find("GE_Player_Sagiri_Melee1_Damage") != std::string::npos,
+        "the ability dictionary must preserve both paths for a reused source id");
+    Check(events.find("\"ability_id\":1") != std::string::npos &&
+              events.find("\"ability_id\":2") != std::string::npos,
+        "events must reference the path-specific ability dictionary entries");
+    Check(encounters.find(
+              "\"ability_stats\":[{\"ability_id\":1,\"damage\":\"100\"") !=
+              std::string::npos &&
+              encounters.find(
+                  "{\"ability_id\":2,\"damage\":\"200\"") !=
+                  std::string::npos,
+        "ability aggregates must not mix different paths that reuse a source id");
+
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+
 void WorkerDrainsCommandsBeforeStopping() {
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto root = std::filesystem::temp_directory_path() /
@@ -364,6 +437,7 @@ void HundredThousandEventsAreSegmentedWithoutLoss() {
 
 int main() {
     ClosedEncounterProducesRecoverableJsonlReport();
+    ReusedSourceIdCreatesDistinctAbilityDictionaryEntries();
     WorkerDrainsCommandsBeforeStopping();
     RecoveryPersistsUncleanShutdownState();
     HundredThousandEventsAreSegmentedWithoutLoss();

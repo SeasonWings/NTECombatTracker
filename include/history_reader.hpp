@@ -33,6 +33,7 @@ struct CombatEventDetail {
     std::uint64_t sequence{};
     std::uint64_t tick_sequence{};
     std::uint32_t flags{};
+    std::uint32_t ability_id{};
     std::uint64_t source_id{};
     Handle attacker;
     Handle victim;

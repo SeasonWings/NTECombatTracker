@@ -26,6 +26,7 @@ add_library(nte_combat_stats_engine STATIC
     src/resource_name_resolver.cpp
     src/damage_cursor.cpp
     src/damage_log.cpp
+    src/event_damage_source_resolver.cpp
     src/log_worker.cpp)
 target_include_directories(nte_combat_stats_engine PUBLIC include)
 target_compile_definitions(nte_combat_stats_engine PRIVATE

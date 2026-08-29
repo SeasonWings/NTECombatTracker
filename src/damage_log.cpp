@@ -377,7 +377,7 @@ struct DamageLogRepository::Impl {
         std::string abilities_content;
         std::unordered_map<combat_stats::Handle, ActorEntry,
             combat_stats::HandleHash> actors;
-        std::unordered_map<std::uint64_t, AbilityEntry> abilities;
+        std::map<std::pair<std::uint64_t, std::string>, AbilityEntry> abilities;
         std::vector<SegmentEntry> segments;
         std::map<std::uint64_t, DamageAggregate> actor_outgoing;
         std::map<std::uint64_t, DamageAggregate> actor_incoming;
@@ -533,8 +533,8 @@ struct DamageLogRepository::Impl {
     static void RebuildAbilitiesContent(ActiveReport& report) {
         std::vector<const AbilityEntry*> rows;
         rows.reserve(report.abilities.size());
-        for (const auto& [source_id, ability] : report.abilities) {
-            static_cast<void>(source_id);
+        for (const auto& [identity, ability] : report.abilities) {
+            static_cast<void>(identity);
             rows.push_back(&ability);
         }
         std::ranges::sort(rows, {}, &AbilityEntry::ability_id);
@@ -620,12 +620,9 @@ struct DamageLogRepository::Impl {
         const std::string& display_name, const std::string& name_origin,
         const std::string& resource_version, std::string& error) {
         auto& report = *active;
-        if (const auto found = report.abilities.find(source_id);
+        const auto identity = std::pair{source_id, name};
+        if (const auto found = report.abilities.find(identity);
             found != report.abilities.end()) {
-            if (found->second.name.starts_with("Unknown") && !name.starts_with("Unknown")) {
-                found->second.name = name;
-                report.abilities_dirty = true;
-            }
             if (!display_name.empty() && found->second.display_name != display_name) {
                 found->second.display_name = display_name;
                 found->second.name_origin = name_origin;
@@ -642,7 +639,7 @@ struct DamageLogRepository::Impl {
             return 0;
         }
         const std::uint32_t id = static_cast<std::uint32_t>(report.abilities.size() + 1);
-        report.abilities.emplace(source_id, AbilityEntry{id, source_id, name,
+        report.abilities.emplace(identity, AbilityEntry{id, source_id, name,
             display_name, name_origin, resource_version});
         report.abilities_dirty = true;
         RebuildAbilitiesContent(report);

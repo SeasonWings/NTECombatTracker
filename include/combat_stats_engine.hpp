@@ -200,7 +200,7 @@ struct TimedDamage {
 };
 
 struct SourceKey {
-    std::uint64_t source_id{};
+    std::string source_identity;
     Handle participant;
     friend bool operator==(const SourceKey&, const SourceKey&) = default;
 };
@@ -298,7 +298,7 @@ private:
     std::vector<RecentEvent> recent_events_;
     std::unordered_map<std::uint32_t, std::uint64_t> damage_flag_histogram_;
     std::vector<TimedDamage> rolling_outgoing_;
-    std::unordered_map<std::uint64_t, AggregateRow> outgoing_sources_;
+    std::unordered_map<std::string, AggregateRow> outgoing_sources_;
     std::unordered_map<Handle, AggregateRow, HandleHash> outgoing_targets_;
     std::unordered_map<SourceKey, AggregateRow, SourceKeyHash> incoming_sources_;
     std::unordered_map<std::string, PlayerAggregate> confirmed_controlled_actors_;

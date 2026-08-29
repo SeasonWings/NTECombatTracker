@@ -1,5 +1,6 @@
 #include "combat_stats_engine.hpp"
 #include "damage_cursor.hpp"
+#include "event_damage_source_resolver.hpp"
 #include "log_worker.hpp"
 #include "resource_name_resolver.hpp"
 #include "overlay_publish_policy.hpp"
@@ -87,7 +88,6 @@ struct Context {
     std::unique_ptr<nte::damage_log::DamageLogWorker> log_worker;
     std::filesystem::path log_root;
     LogSession log_session;
-    std::unordered_map<std::uint64_t, NameCacheEntry> source_names;
     std::unordered_map<Handle, NameCacheEntry, nte::combat_stats::HandleHash>
         participant_names;
     std::mutex mutex;
@@ -230,29 +230,6 @@ std::string ResolveParticipant(
             return service->participant_path_utf8(
                 service->user, participant, destination, size);
         }, "Unknown participant");
-}
-
-std::string ResolveSourceCached(
-    const AnomalyNteCombatServiceV1* service,
-    const std::uint64_t source_id,
-    const std::uint64_t sequence) {
-    if (source_id == 0) return "Unknown source";
-    auto found = g_context.source_names.find(source_id);
-    if (found != g_context.source_names.end()) {
-        if (!found->second.value.empty()) return found->second.value;
-        if (found->second.attempts >= 3 || sequence < found->second.retry_after_sequence) {
-            return "Unknown source";
-        }
-    } else if (g_context.source_names.size() >= kMaximumNameCacheEntries) {
-        return "Unknown source";
-    } else {
-        found = g_context.source_names.emplace(source_id, NameCacheEntry{}).first;
-    }
-    const std::string resolved = ResolveSource(service, source_id);
-    if (!resolved.starts_with("Unknown")) found->second.value = resolved;
-    ++found->second.attempts;
-    found->second.retry_after_sequence = sequence + 64;
-    return resolved;
 }
 
 std::string ResolveParticipantCached(
@@ -475,7 +452,6 @@ void FinishReportLog(const char* reason, const std::int64_t utc_ms) {
             nte::damage_log::ReportClose{reason, utc_ms, false}));
     }
     session = {};
-    g_context.source_names.clear();
     g_context.participant_names.clear();
     g_context.pending_cursor_gap_first.reset();
     g_context.pending_missing_sequence_ranges.clear();
@@ -684,7 +660,6 @@ void ResetState() {
     g_context.engine.Reset();
     g_context.cursor.Clear();
     g_context.log_session = {};
-    g_context.source_names.clear();
     g_context.participant_names.clear();
     g_context.observed_world = {};
     g_context.pending_cursor_gap_first.reset();
@@ -919,14 +894,18 @@ void Update(void* context, double) {
                     }
                     normalized.received_utc_ms = utc_ms;
                     normalized.received_offset_us = ReportOffsetMicroseconds(now);
-                    normalized.source_name = ResolveSourceCached(
-                        combat.get(), event.source_id, event.sequence);
                     normalized.attacker_name = ResolveParticipantCached(
                         combat.get(), event.attacker, event.sequence);
                     normalized.victim_name = ResolveParticipantCached(
                         combat.get(), event.victim, event.sequence);
-                    const auto source_display = g_context.name_resolver.ResolveDamageSource(
-                        normalized.source_name);
+                    const auto source_display =
+                        nte::combat_stats::ResolveEventDamageSource(
+                            event.source_id,
+                            [service = combat.get()](const std::uint64_t source_id) {
+                                return ResolveSource(service, source_id);
+                            },
+                            g_context.name_resolver);
+                    normalized.source_name = source_display.technical_name;
                     const auto attacker_display = g_context.name_resolver.ResolveParticipant(
                         normalized.attacker_name);
                     const auto victim_display = g_context.name_resolver.ResolveParticipant(

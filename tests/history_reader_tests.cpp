@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 
 namespace {
@@ -172,6 +173,20 @@ void ClosedLogsCanBeBrowsedAndDrilledDown() {
                 "source drill-down should retain the selected source name");
         }
 
+        auto renumbered_events = detail->events;
+        renumbered_events[1].source_id = 88;
+        const auto renumbered_sources = nte::combat_stats::overlay::GroupDamageSources(
+            renumbered_events, player, DetailDirection::Outgoing);
+        Check(renumbered_sources.size() == 1 && renumbered_sources[0].damage == 200,
+            "the same technical source path should aggregate across source id generations");
+        if (renumbered_sources.size() == 1) {
+            const auto renumbered_hits = nte::combat_stats::overlay::FilterDamageEvents(
+                renumbered_events, player, DetailDirection::Outgoing,
+                renumbered_sources[0]);
+            Check(renumbered_hits.size() == 2,
+                "source drill-down should follow technical identity across generations");
+        }
+
         auto incomplete_players = detail->players;
         incomplete_players[0].positive_hits = 7;
         incomplete_players[0].critical_hits = 4;
@@ -190,10 +205,80 @@ void ClosedLogsCanBeBrowsedAndDrilledDown() {
     std::filesystem::remove_all(root, ignored);
 }
 
+void EventAbilityIdDisambiguatesReusedSourceIds() {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto root = std::filesystem::temp_directory_path() /
+        ("nte-history-source-reuse-test-" + std::to_string(nonce));
+    const std::string report_id = "33333333-4444-4555-8666-777777777777";
+    const std::string encounter_id = "cccccccc-dddd-4eee-8fff-000000000000";
+    const auto report = root / "reports" / report_id;
+    std::filesystem::create_directories(report);
+    {
+        std::ofstream actors(report / "actors.jsonl", std::ios::binary);
+        actors << "{\"schema_version\":1,\"actor_id\":1,"
+                  "\"handle\":{\"id\":\"2\",\"generation\":\"1\"},"
+                  "\"path\":\"Player\"}\n"
+                  "{\"schema_version\":1,\"actor_id\":2,"
+                  "\"handle\":{\"id\":\"3\",\"generation\":\"1\"},"
+                  "\"path\":\"Enemy\"}\n";
+    }
+    {
+        std::ofstream abilities(report / "abilities.jsonl", std::ios::binary);
+        abilities << "{\"schema_version\":1,\"ability_id\":1,"
+                     "\"source_id\":\"9223372036854775813\","
+                     "\"name\":\"GE_Player_Shinku_Melee1_1_Damage\","
+                     "\"display_name\":\"普通攻击：特种格斗术\","
+                     "\"name_origin\":\"resource\"}\n"
+                     "{\"schema_version\":1,\"ability_id\":2,"
+                     "\"source_id\":\"9223372036854775813\","
+                     "\"name\":\"GE_Player_Sagiri_Melee1_Damage\","
+                     "\"display_name\":\"鬼郎丸挥击\","
+                     "\"name_origin\":\"resource\"}\n";
+    }
+    {
+        std::ofstream events(report / "events-000001.jsonl", std::ios::binary);
+        const auto write_event = [&](const int sequence, const int ability_id,
+                                     const char* source) {
+            events << "{\"schema_version\":1,\"event_type\":\"damage\","
+                   << "\"encounter_id\":\"" << encounter_id << "\","
+                   << "\"sequence\":\"" << sequence << "\","
+                   << "\"tick_sequence\":\"" << sequence << "\","
+                   << "\"flags\":0,\"ability_id\":" << ability_id << ','
+                   << "\"source_id\":\"9223372036854775813\","
+                   << "\"attacker\":{\"id\":\"2\",\"generation\":\"1\"},"
+                   << "\"victim\":{\"id\":\"3\",\"generation\":\"1\"},"
+                   << "\"final_damage\":\"100\",\"basic_damage\":\"0\","
+                   << "\"display_damage\":\"0\",\"received_utc_ms\":1,"
+                   << "\"received_offset_us\":\"1\",\"source_name\":\""
+                   << source << "\",\"source_display_name\":\"" << source
+                   << "\",\"source_name_origin\":\"technical\"}\n";
+        };
+        write_event(1, 1, "GE_Player_Shinku_Melee1_1_Damage");
+        write_event(2, 2, "GE_Player_Sagiri_Melee1_Damage");
+    }
+
+    CombatLogReader reader(root);
+    std::string error;
+    const auto events = reader.Events(report_id, encounter_id, error);
+    Check(error.empty() && events.size() == 2,
+        "history should load events that reuse a source id");
+    if (events.size() == 2) {
+        Check(events[0].ability_id == 1 &&
+                  events[0].source_display_name == "普通攻击：特种格斗术" &&
+                  events[1].ability_id == 2 &&
+                  events[1].source_display_name == "鬼郎丸挥击",
+            "event ability ids must select the matching localized dictionary row");
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+
 }  // namespace
 
 int main() {
     ClosedLogsCanBeBrowsedAndDrilledDown();
+    EventAbilityIdDisambiguatesReusedSourceIds();
     if (failures != 0) return 1;
     std::cout << "All history reader tests passed\n";
     return 0;

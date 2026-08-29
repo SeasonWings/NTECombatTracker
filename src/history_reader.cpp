@@ -1,4 +1,5 @@
 #include "history_reader.hpp"
+#include "event_damage_source_resolver.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -166,6 +167,7 @@ CombatEventDetail ParseEvent(const Json& value) {
     result.sequence = Decimal<std::uint64_t>(value.at("sequence"));
     result.tick_sequence = Decimal<std::uint64_t>(value.at("tick_sequence"));
     result.flags = value.at("flags").get<std::uint32_t>();
+    result.ability_id = value.value("ability_id", 0U);
     result.source_id = Decimal<std::uint64_t>(value.at("source_id"));
     const auto& attacker = value.at("attacker");
     const auto& victim = value.at("victim");
@@ -282,10 +284,16 @@ std::vector<CombatEventDetail> CombatLogReader::Events(
             static_cast<void>(id);
             actor_names.insert_or_assign(actor.handle, actor);
         }
-        std::unordered_map<std::uint64_t, AbilityName> ability_names;
+        std::map<std::pair<std::uint64_t, std::string>, const AbilityName*>
+            abilities_by_identity;
+        std::unordered_map<std::uint64_t, const AbilityName*> unique_abilities_by_source;
         for (const auto& [id, ability] : abilities) {
             static_cast<void>(id);
-            ability_names.insert_or_assign(ability.source_id, ability);
+            abilities_by_identity.emplace(
+                std::pair{ability.source_id, ability.technical_name}, &ability);
+            const auto [found, inserted] = unique_abilities_by_source.emplace(
+                ability.source_id, &ability);
+            if (!inserted) found->second = nullptr;
         }
         std::error_code filesystem_error;
         std::vector<std::filesystem::path> segments;
@@ -326,13 +334,35 @@ std::vector<CombatEventDetail> CombatLogReader::Events(
                                 event.victim_resource_version = victim->second.resource_version;
                             }
                         }
-                        if (const auto source = ability_names.find(event.source_id);
-                            source != ability_names.end() &&
+                        const AbilityName* source{};
+                        if (event.ability_id != 0) {
+                            if (const auto found = abilities.find(event.ability_id);
+                                found != abilities.end() &&
+                                found->second.source_id == event.source_id &&
+                                found->second.technical_name == event.source) {
+                                source = &found->second;
+                            }
+                        }
+                        if (source == nullptr) {
+                            if (const auto found = abilities_by_identity.find(
+                                    {event.source_id, event.source});
+                                found != abilities_by_identity.end()) {
+                                source = found->second;
+                            }
+                        }
+                        if (source == nullptr) {
+                            if (const auto found = unique_abilities_by_source.find(
+                                    event.source_id);
+                                found != unique_abilities_by_source.end()) {
+                                source = found->second;
+                            }
+                        }
+                        if (source != nullptr &&
                             event.source_name_origin == "technical" &&
-                            source->second.name_origin != "technical") {
-                            event.source_display_name = source->second.display_name;
-                            event.source_name_origin = source->second.name_origin;
-                            event.source_resource_version = source->second.resource_version;
+                            source->name_origin != "technical") {
+                            event.source_display_name = source->display_name;
+                            event.source_name_origin = source->name_origin;
+                            event.source_resource_version = source->resource_version;
                         }
                         result.push_back(std::move(event));
                     }
@@ -522,13 +552,12 @@ std::vector<DamageSourceSummary> GroupDamageSources(
     const Handle player,
     const DetailDirection direction) {
     struct Key {
-        std::uint64_t source_id{};
         Handle participant;
-        std::string source_name;
+        std::string source_identity;
         bool operator<(const Key& right) const {
-            return std::tie(source_id, participant.id, participant.generation, source_name) <
-                std::tie(right.source_id, right.participant.id,
-                    right.participant.generation, right.source_name);
+            return std::tie(participant.id, participant.generation, source_identity) <
+                std::tie(right.participant.id,
+                    right.participant.generation, right.source_identity);
         }
     };
     std::map<Key, DamageSourceSummary> rows;
@@ -538,7 +567,8 @@ std::vector<DamageSourceSummary> GroupDamageSources(
         if (!matches || event.final_damage <= 0) continue;
         const Handle participant = direction == DetailDirection::Incoming
             ? event.attacker : Handle{};
-        auto& row = rows[{event.source_id, participant, event.source}];
+        auto& row = rows[{participant,
+            DamageSourceIdentity(event.source_id, event.source)}];
         row.source_id = event.source_id;
         row.participant = participant;
         row.source_name = event.source;
@@ -575,8 +605,10 @@ std::vector<CombatEventDetail> FilterDamageEvents(
         const bool participant_matches = direction == DetailDirection::Outgoing
             ? event.attacker == player
             : event.victim == player && event.attacker == source.participant;
-        if (participant_matches && event.source_id == source.source_id &&
-            event.source == source.source_name &&
+        const bool source_matches = event.source == source.source_name &&
+            (DamageSourceIdentity(event.source_id, event.source) == event.source ||
+                event.source_id == source.source_id);
+        if (participant_matches && source_matches &&
             event.final_damage > 0) {
             result.push_back(event);
         }

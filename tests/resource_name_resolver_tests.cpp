@@ -1,4 +1,5 @@
 #include "resource_name_resolver.hpp"
+#include "event_damage_source_resolver.hpp"
 
 #include <array>
 #include <chrono>
@@ -67,6 +68,35 @@ void RepositoryResourcesResolveSdkTechnicalPaths() {
     Check(unmapped.display_name == "GE_Boss_Unmapped_Damage" &&
               unmapped.origin == nte::combat_stats::DisplayNameOrigin::Technical,
         "unmapped GE names should fall back to the technical identifier");
+}
+
+void EventSourceResolutionDoesNotCacheReusableSdkIds() {
+    std::string error;
+    const auto resolver = nte::combat_stats::ResourceNameResolver::Load(
+        std::filesystem::path(NTE_TEST_SOURCE_DIR) / "res", error);
+    Check(error.empty(), "event source fixture resources should load");
+
+    std::string current =
+        "Default__GE_Player_Shinku_Melee1_1_Damage_C";
+    std::uint32_t lookups{};
+    const auto lookup = [&](const std::uint64_t source_id) {
+        Check(source_id == 0x8000000000000005ULL,
+            "event source resolver should forward the opaque SDK id");
+        ++lookups;
+        return current;
+    };
+    const auto before_reset = nte::combat_stats::ResolveEventDamageSource(
+        0x8000000000000005ULL, lookup, resolver);
+    current = "Default__GE_Player_Lacrimosa_Melee1_Damage_C";
+    const auto after_reset = nte::combat_stats::ResolveEventDamageSource(
+        0x8000000000000005ULL, lookup, resolver);
+
+    Check(lookups == 2,
+        "the same source id must be looked up again for every accepted event");
+    Check(before_reset.display_name == "普通攻击：特种格斗术" &&
+              after_reset.display_name == "酸甜口味的制裁" &&
+              after_reset.technical_name == current,
+        "a reused source id must resolve from its current technical path");
 }
 
 void MissingResourcesDegradeSafely() {
@@ -189,6 +219,7 @@ void UnknownNamesFallBackWithoutChangingIdentity() {
 
 int main() {
     RepositoryResourcesResolveSdkTechnicalPaths();
+    EventSourceResolutionDoesNotCacheReusableSdkIds();
     UnknownNamesFallBackWithoutChangingIdentity();
     MissingResourcesDegradeSafely();
     CorruptAndAmbiguousResourcesDegradeSafely();

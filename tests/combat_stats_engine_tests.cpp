@@ -517,6 +517,42 @@ void AggregatesAndQualityFlags() {
     Check(snapshot.quality.overflow, "overflow flag should propagate");
 }
 
+void DamageSourceAggregatesUseTechnicalPathIdentity() {
+    CombatStatsEngine engine;
+    const TimePoint start{550s};
+    const Handle world{65, 1};
+    const Handle player{66, 1};
+    engine.ObserveCombatant(Combatant{world, player, 100.0, 100.0, 0.0}, start);
+
+    auto shinku = Outgoing(1, world, player, 100);
+    shinku.source_id = 0x8000000000000005ULL;
+    shinku.source_name = "GE_Player_Shinku_Melee1_1_Damage";
+    shinku.source_display_name = "普通攻击：特种格斗术";
+    engine.AcceptDamage(shinku, start);
+
+    auto sagiri = shinku;
+    sagiri.sequence = 2;
+    sagiri.final_damage = 200;
+    sagiri.source_name = "GE_Player_Sagiri_Melee1_Damage";
+    sagiri.source_display_name = "鬼郎丸挥击";
+    engine.AcceptDamage(sagiri, start + 1s);
+
+    auto sagiri_after_reset = sagiri;
+    sagiri_after_reset.sequence = 3;
+    sagiri_after_reset.source_id = 0x8000000000000042ULL;
+    sagiri_after_reset.final_damage = 50;
+    engine.AcceptDamage(sagiri_after_reset, start + 2s);
+
+    const auto snapshot = engine.BuildSnapshot(start + 2s);
+    Check(snapshot.outgoing_sources.size() == 2,
+        "reused source ids with different technical paths must remain distinct");
+    const auto sagiri_row = std::ranges::find_if(snapshot.outgoing_sources,
+        [](const auto& row) { return row.label == "鬼郎丸挥击"; });
+    Check(sagiri_row != snapshot.outgoing_sources.end() &&
+              sagiri_row->damage == 250 && sagiri_row->positive_hits == 2,
+        "the same technical path should aggregate across source id generations");
+}
+
 void AggregateLimitUsesOtherBucket() {
     CombatStatsEngine engine;
     const TimePoint start{600s};
@@ -656,6 +692,7 @@ int main() {
     EncounterAndRollingDps();
     EncounterDpsUsesPlayerActivityWindow();
     AggregatesAndQualityFlags();
+    DamageSourceAggregatesUseTechnicalPathIdentity();
     AggregateLimitUsesOtherBucket();
     DamageTotalsSaturateOnOverflow();
     CursorDefersResetAndRecoversRetainedWindow();

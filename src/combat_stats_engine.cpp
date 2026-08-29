@@ -1,4 +1,5 @@
 #include "combat_stats_engine.hpp"
+#include "event_damage_source_resolver.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -12,7 +13,7 @@ std::size_t HandleHash::operator()(const Handle& value) const noexcept {
 }
 
 std::size_t SourceKeyHash::operator()(const SourceKey& value) const noexcept {
-    return std::hash<std::uint64_t>{}(value.source_id) ^
+    return std::hash<std::string>{}(value.source_identity) ^
         (HandleHash{}(value.participant) << 1U);
 }
 
@@ -259,7 +260,8 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
             last_positive_outgoing_ = now;
             rolling_outgoing_.push_back({now, event.final_damage});
             AddBoundedAggregate(
-                outgoing_sources_, event.source_id,
+                outgoing_sources_, DamageSourceIdentity(
+                    event.source_id, event.source_name),
                 event.source_display_name.empty()
                     ? event.source_name : event.source_display_name,
                 event.final_damage, other_outgoing_source_, quality_.aggregate_truncated,
@@ -312,7 +314,8 @@ bool CombatStatsEngine::AcceptDamage(const DamageEvent& event, const TimePoint n
             quality_.overflow = SaturatingIncrement(incoming_positive_hits_) ||
                 quality_.overflow;
             AddBoundedAggregate(
-                incoming_sources_, SourceKey{event.source_id, event.attacker},
+                incoming_sources_, SourceKey{DamageSourceIdentity(
+                    event.source_id, event.source_name), event.attacker},
                 (event.attacker_display_name.empty()
                     ? event.attacker_name : event.attacker_display_name) + " / " +
                 (event.source_display_name.empty()
