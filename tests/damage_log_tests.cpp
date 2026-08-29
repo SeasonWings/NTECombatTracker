@@ -433,6 +433,75 @@ void HundredThousandEventsAreSegmentedWithoutLoss() {
     std::filesystem::remove_all(root, ignored);
 }
 
+void StoragePathBoundaryKeepsReportsSeparated() {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto base = std::filesystem::temp_directory_path() /
+        ("nte-log-root-switch-test-" + std::to_string(nonce));
+    const auto old_root = base / "old";
+    const auto new_root = base / "new";
+    const std::string old_report = "11111111-2222-4333-8444-555555555555";
+    const std::string new_report = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+    const std::string old_encounter = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const std::string new_encounter = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+
+    const auto write_report = [](const std::filesystem::path& root,
+                                  const std::string& report_id,
+                                  const std::string& encounter_id,
+                                  const std::uint64_t sequence,
+                                  const char* close_reason) {
+        DamageLogRepository repository(root);
+        std::string error;
+        Check(repository.Recover(error), "switch repository should initialize");
+        Check(repository.BeginReport(
+            ReportOpen{report_id, {1, 1}, 1000, "build"}, error),
+            "switch report should open");
+        Check(repository.BeginEncounter(
+            EncounterOpen{encounter_id, 1000, 0}, error),
+            "switch encounter should open");
+        DamageEvent event;
+        event.sequence = sequence;
+        event.world = {1, 1};
+        event.attacker = {2, 1};
+        event.victim = {3, 1};
+        event.source_id = 4;
+        event.final_damage = static_cast<std::int64_t>(sequence);
+        event.source_name = "Skill";
+        event.attacker_name = "Attacker";
+        event.victim_name = "Victim";
+        Check(repository.Append(
+            LoggedDamage{event, 1100, 100, true}, error),
+            "switch event should append");
+        Check(repository.EndEncounter(EncounterClose{
+            encounter_id, close_reason, 1200, 200,
+            event.final_damage, 0, 1.0, 0.2, {}}, error),
+            "switch encounter should close");
+        Check(repository.CloseReport(
+            ReportClose{close_reason, 1200, false}, error),
+            "switch report should close");
+    };
+
+    write_report(old_root, old_report, old_encounter, 101,
+        "storage_path_changed");
+    write_report(new_root, new_report, new_encounter, 202,
+        "plugin_stop");
+
+    const auto old_events = ReadAll(
+        old_root / "reports" / old_report / "events-000001.jsonl");
+    const auto new_events = ReadAll(
+        new_root / "reports" / new_report / "events-000001.jsonl");
+    Check(old_events.find("\"sequence\":\"101\"") != std::string::npos &&
+            old_events.find("\"sequence\":\"202\"") == std::string::npos,
+        "old root should contain only pre-switch events");
+    Check(new_events.find("\"sequence\":\"202\"") != std::string::npos &&
+            new_events.find("\"sequence\":\"101\"") == std::string::npos,
+        "new root should contain only post-switch events");
+    Check(ReadAll(old_root / "reports" / old_report / "report.json").find(
+            "\"close_reason\":\"storage_path_changed\"") != std::string::npos,
+        "old report should record the storage-path boundary");
+    std::error_code ignored;
+    std::filesystem::remove_all(base, ignored);
+}
+
 }  // namespace
 
 int main() {
@@ -441,6 +510,7 @@ int main() {
     WorkerDrainsCommandsBeforeStopping();
     RecoveryPersistsUncleanShutdownState();
     HundredThousandEventsAreSegmentedWithoutLoss();
+    StoragePathBoundaryKeepsReportsSeparated();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return 1;

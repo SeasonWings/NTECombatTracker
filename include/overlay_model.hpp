@@ -199,6 +199,9 @@ void ReconcileLiveNavigation(
 [[nodiscard]] ReferenceTheme OverlayReferenceTheme() noexcept;
 [[nodiscard]] ReferenceMetrics OverlayReferenceMetrics() noexcept;
 [[nodiscard]] OverlayTextStyles OverlayReferenceTextStyles() noexcept;
+[[nodiscard]] bool ShouldHideOverlay(
+    bool hide_idle,
+    std::optional<EncounterState> state) noexcept;
 [[nodiscard]] TitleBarLayout CalculateTitleBarLayout(
     float width, float scale, float title_height) noexcept;
 [[nodiscard]] ViewRect CalculateCellTextRect(

@@ -99,6 +99,12 @@ OverlayTextStyles OverlayReferenceTextStyles() noexcept {
     };
 }
 
+bool ShouldHideOverlay(
+    const bool hide_idle,
+    const std::optional<EncounterState> state) noexcept {
+    return hide_idle && state == EncounterState::Idle;
+}
+
 TitleBarLayout CalculateTitleBarLayout(
     const float width,
     const float scale,

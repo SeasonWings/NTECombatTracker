@@ -67,6 +67,8 @@ anomaly-test-host --plugin .\build\package\NteCombatTracker --reload 10 --ticks 
 - 为兼容已有安装，配置继续保存在稳定数据目录 `%LOCALAPPDATA%\NTECombatStats\overlay-settings.json`。
 - Overlay 只接收自有 `NteOverlaySnapshot`，不使用 ACT `CombatData`、OverlayPlugin、CEF 或 WebView2。
 
+游戏内插件菜单只用于配置，不再重复显示战斗统计、最近事件或历史列表。菜单可以在运行期间开启或关闭 Overlay，并可调整锁定/点击穿透、折叠、置顶、离战隐藏、透明度和界面缩放；这些设置与 Overlay 自身右键菜单共用同一份配置并实时同步。关闭状态仅对当前插件会话有效，下次启动仍会自动开启 Overlay。
+
 ## 本地日志
 
 玩家首次造成或承受伤害时创建遭遇；遭遇开始后保存同一 World 中宿主发布的所有可见伤害事件，但只有玩家相关事件会延长 10 秒脱战计时。日志使用客户端接收时间，并非服务器权威时间。
@@ -84,6 +86,8 @@ anomaly-test-host --plugin .\build\package\NteCombatTracker --reload 10 --ticks 
     ├── events-000001.jsonl
     └── index.json
 ```
+
+插件菜单可以输入绝对路径来更改日志根目录，并可直接在资源管理器中打开当前目录。选择的目录保存在 `%LOCALAPPDATA%\NTECombatStats\plugin-settings.json`；配置缺失、损坏或目录不可用时回退到上述默认目录。战斗中应用新路径会以 `storage_path_changed` 完整关闭旧目录中的 Encounter 和 Report、清空当前实时统计，并由下一次相关伤害在新目录开始新的记录。已有日志不会自动迁移或删除。
 
 每条原始事件保存 sequence、tick sequence、完整 damage flags、显示/基础/最终伤害、命中位置、伤害与反应类型、参与者和来源。64 位标识及伤害值以十进制字符串编码。游戏内“历史”页可查看基础汇总并经二次确认删除关闭的 Report。
 

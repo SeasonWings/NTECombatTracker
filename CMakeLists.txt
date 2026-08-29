@@ -46,6 +46,7 @@ if(MSVC)
 endif()
 
 add_library(nte_overlay_model STATIC
+    src/app_settings.cpp
     src/overlay_model.cpp
     src/overlay_publish_policy.cpp
     src/history_reader.cpp)
@@ -135,6 +136,13 @@ if(BUILD_TESTING)
             /W4 /permissive- /EHsc /utf-8)
     endif()
     add_test(NAME nte_attribute_color_map COMMAND nte_attribute_color_map_tests)
+
+    add_executable(nte_app_settings_tests tests/app_settings_tests.cpp)
+    target_link_libraries(nte_app_settings_tests PRIVATE nte_overlay_model)
+    if(MSVC)
+        target_compile_options(nte_app_settings_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME nte_app_settings COMMAND nte_app_settings_tests)
 endif()
 
 option(NTE_COMBAT_STATS_BUILD_PLUGIN "Build the Anomaly plugin package" ON)

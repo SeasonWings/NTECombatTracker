@@ -1,4 +1,5 @@
 #include "combat_stats_engine.hpp"
+#include "app_settings.hpp"
 #include "damage_cursor.hpp"
 #include "event_damage_source_resolver.hpp"
 #include "log_worker.hpp"
@@ -14,7 +15,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdio>
-#include <ctime>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -24,18 +24,16 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include <windows.h>
+#include <shellapi.h>
 
 namespace {
 
-using nte::combat_stats::AggregateRow;
 using nte::combat_stats::CombatStatsEngine;
 using nte::combat_stats::EncounterState;
-using nte::combat_stats::EventDirection;
 using nte::combat_stats::Handle;
 using nte::combat_stats::Snapshot;
 using nte::combat_stats::TimePoint;
@@ -43,9 +41,9 @@ using nte::combat_stats::NteOverlaySnapshot;
 
 constexpr std::size_t kMaximumDrainPerUpdate = 256;
 constexpr std::size_t kMaximumResolvedNameBytes = 4096;
-constexpr std::size_t kMaximumRecentRows = 100;
 constexpr std::size_t kMaximumNameCacheEntries = 4096;
 constexpr std::size_t kMaximumServiceGapIntervals = 64;
+constexpr std::size_t kMaximumPathBytes = 32768;
 
 struct NameCacheEntry {
     std::string value;
@@ -59,6 +57,10 @@ struct RenderState {
     std::string log_root;
     std::string overlay_error;
     std::string name_resource_error;
+    nte::settings::OverlaySettings overlay_settings;
+    bool overlay_enabled{true};
+    std::string settings_status;
+    std::string settings_error;
 };
 
 struct LogSession {
@@ -92,14 +94,10 @@ struct Context {
         participant_names;
     std::mutex mutex;
     RenderState render;
-    bool reset_requested{};
-    std::string delete_request;
-    std::string pending_delete;
     Handle observed_world;
     std::optional<std::uint64_t> pending_cursor_gap_first;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> pending_missing_sequence_ranges;
     bool pending_missing_ranges_truncated{};
-    std::unordered_set<std::string> expanded_reports;
     const AnomalyWebSocketServiceV1* websocket{};
     const AnomalyCoreServiceV1* core{};
     std::string producer_instance_id;
@@ -108,7 +106,15 @@ struct Context {
     nte::combat_stats::OverlayPublishPolicy overlay_policy;
     bool overlay_launch_attempted{};
     bool overlay_restart_pending{};
-    bool restart_overlay_requested{};
+    bool toggle_overlay_requested{};
+    bool open_log_root_requested{};
+    std::string requested_log_root;
+    std::optional<nte::settings::OverlaySettings> requested_overlay_settings;
+    nte::settings::OverlaySettings overlay_settings;
+    std::array<char, kMaximumPathBytes> log_root_input{};
+    std::chrono::steady_clock::time_point next_settings_refresh{};
+    std::string settings_status;
+    std::string settings_error;
     AnomalyWebSocketServerInfoV1 overlay_server_info{sizeof(AnomalyWebSocketServerInfoV1)};
     std::string overlay_error;
     std::string control_status;
@@ -169,6 +175,12 @@ void RecordMissingRange(const std::uint64_t first, const std::uint64_t last) {
             g_context.log_session.missing_ranges_truncated = true;
         }
     }
+}
+
+void ResetPendingCaptureGaps() {
+    g_context.pending_cursor_gap_first.reset();
+    g_context.pending_missing_sequence_ranges.clear();
+    g_context.pending_missing_ranges_truncated = false;
 }
 
 template <typename Struct, typename Field>
@@ -256,48 +268,9 @@ std::string ResolveParticipantCached(
     return resolved;
 }
 
-std::string ShortName(const std::string& path) {
-    const std::size_t slash = path.find_last_of("/\\");
-    const std::size_t dot = path.find_last_of('.');
-    const std::size_t position = slash == std::string::npos
-        ? dot
-        : (dot == std::string::npos ? slash : (std::max)(slash, dot));
-    if (position == std::string::npos || position + 1 >= path.size()) return path;
-    return path.substr(position + 1);
-}
-
-const char* StateName(const EncounterState state) noexcept {
-    switch (state) {
-    case EncounterState::Idle: return "等待战斗";
-    case EncounterState::Active: return "战斗中";
-    case EncounterState::Completed: return "已结束";
-    }
-    return "未知";
-}
-
-const char* StatusName(const std::uint32_t status) noexcept {
-    switch (status) {
-    case ANOMALY_STATUS_V1_OK: return "可用";
-    case ANOMALY_STATUS_V1_UNAVAILABLE: return "不可用（Profile 或服务未就绪）";
-    case ANOMALY_STATUS_V1_PERMISSION_DENIED: return "权限不足";
-    default: return "采集异常";
-    }
-}
-
 std::int64_t UtcNowMilliseconds() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-}
-
-std::string FormatUtcDate(const std::int64_t utc_ms) {
-    const auto point = std::chrono::system_clock::time_point(
-        std::chrono::milliseconds(utc_ms));
-    const std::time_t time = std::chrono::system_clock::to_time_t(point);
-    std::tm utc{};
-    if (gmtime_s(&utc, &time) != 0) return std::to_string(utc_ms);
-    std::array<char, 32> value{};
-    std::strftime(value.data(), value.size(), "%Y-%m-%d %H:%M:%S UTC", &utc);
-    return value.data();
 }
 
 std::uint64_t ReportOffsetMicroseconds(const TimePoint now) {
@@ -418,11 +391,10 @@ bool FinishEncounterLog(
     close.damage_flag_histogram = snapshot.damage_flag_histogram;
     if (!g_context.log_worker->Submit(std::move(close))) return false;
     std::string flush_error;
-    if (!g_context.log_worker->FlushAndWait(std::chrono::seconds(5), flush_error)) {
-        return false;
-    }
+    const bool flushed = g_context.log_worker->FlushAndWait(
+        std::chrono::seconds(5), flush_error);
     ResetEncounterSession();
-    return true;
+    return flushed;
 }
 
 void UpdateServiceGap(const bool available, const TimePoint now) {
@@ -445,17 +417,20 @@ void UpdateServiceGap(const bool available, const TimePoint now) {
     session.service_unavailable_started_us.reset();
 }
 
-void FinishReportLog(const char* reason, const std::int64_t utc_ms) {
+bool FinishReportLog(const char* reason, const std::int64_t utc_ms) {
     auto& session = g_context.log_session;
-    if (g_context.log_worker && !session.report_id.empty()) {
-        static_cast<void>(g_context.log_worker->Submit(
-            nte::damage_log::ReportClose{reason, utc_ms, false}));
+    if (session.report_id.empty()) return true;
+    if (!g_context.log_worker || !g_context.log_worker->Submit(
+            nte::damage_log::ReportClose{reason, utc_ms, false})) {
+        return false;
     }
+    std::string flush_error;
+    const bool flushed = g_context.log_worker->FlushAndWait(
+        std::chrono::seconds(5), flush_error);
     session = {};
     g_context.participant_names.clear();
-    g_context.pending_cursor_gap_first.reset();
-    g_context.pending_missing_sequence_ranges.clear();
-    g_context.pending_missing_ranges_truncated = false;
+    ResetPendingCaptureGaps();
+    return flushed;
 }
 
 const char* CaptureStatusName(const std::uint32_t status) noexcept {
@@ -583,6 +558,137 @@ bool LaunchOverlay(
     return true;
 }
 
+HWND OverlayWindow() {
+    return FindWindowW(nte::combat_stats::overlay::kWindowClassName,
+        nte::combat_stats::overlay::kWindowTitle);
+}
+
+void NotifyOverlaySettingsChanged() {
+    const HWND window = OverlayWindow();
+    const UINT message = RegisterWindowMessageW(
+        nte::combat_stats::overlay::kReloadSettingsMessageName);
+    if (window != nullptr && message != 0) PostMessageW(window, message, 0, 0);
+}
+
+void CloseOverlayWindow() {
+    const HWND window = OverlayWindow();
+    const UINT message = RegisterWindowMessageW(
+        nte::combat_stats::overlay::kCloseOverlayMessageName);
+    if (window != nullptr && message != 0) PostMessageW(window, message, 0, 0);
+}
+
+void CopyLogRootToInput(const std::filesystem::path& path) {
+    const std::string utf8 = nte::settings::PathToUtf8(path);
+    std::scoped_lock lock(g_context.mutex);
+    std::fill(g_context.log_root_input.begin(), g_context.log_root_input.end(), '\0');
+    const std::size_t count = (std::min)(
+        utf8.size(), g_context.log_root_input.size() - 1);
+    std::copy_n(utf8.data(), count, g_context.log_root_input.data());
+}
+
+bool WaitUntilReady(nte::damage_log::DamageLogWorker& worker, std::string& error) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto status = worker.Status();
+        if (status.ready) return true;
+        if (!status.running || !status.last_error.empty()) {
+            error = status.last_error.empty() ? "日志线程未运行" : status.last_error;
+            return false;
+        }
+        Sleep(10);
+    }
+    error = "等待日志目录初始化超时";
+    return false;
+}
+
+bool SwitchLogRoot(
+    const std::filesystem::path& requested,
+    const TimePoint now,
+    const std::int64_t utc_ms,
+    std::string& error) {
+    error.clear();
+    if (!nte::settings::PrepareLogRoot(requested, error)) return false;
+    std::error_code filesystem_error;
+    const auto normalized = std::filesystem::weakly_canonical(requested, filesystem_error);
+    const auto target = filesystem_error ? requested.lexically_normal() : normalized;
+    filesystem_error.clear();
+    const auto current_normalized = std::filesystem::weakly_canonical(
+        g_context.log_root, filesystem_error);
+    const auto current = filesystem_error ?
+        g_context.log_root.lexically_normal() : current_normalized;
+    if (target == current) {
+        if (!nte::settings::SavePluginSettings(
+                nte::settings::PluginSettingsPath(), {target}, error)) return false;
+        g_context.log_root = target;
+        CopyLogRootToInput(target);
+        return true;
+    }
+    auto candidate = std::make_unique<nte::damage_log::DamageLogWorker>(target);
+    if (!candidate->Start() || !WaitUntilReady(*candidate, error)) {
+        candidate->Stop();
+        if (error.empty()) error = "无法启动新目录的日志线程";
+        return false;
+    }
+    auto pending_settings = nte::settings::StagePluginSettings(
+        nte::settings::PluginSettingsPath(), {target}, error);
+    if (!pending_settings) {
+        candidate->Stop();
+        return false;
+    }
+
+    const bool active = g_context.engine.state() == EncounterState::Active;
+    const bool has_open_encounter = !g_context.log_session.encounter_id.empty();
+    if (has_open_encounter && !FinishEncounterLog("storage_path_changed",
+            MakeOverlaySnapshot(g_context.engine.BuildSnapshot(now),
+                CaptureStatusCode(g_context.render.snapshot.get()),
+                g_context.render.snapshot ?
+                    g_context.render.snapshot->latest_damage_sequence : 0,
+                g_context.log_session.report_id,
+                g_context.log_session.encounter_id, utc_ms, false,
+                g_context.overlay_snapshot_sequence), now, utc_ms)) {
+        candidate->Stop();
+        if (active) {
+            g_context.engine.Reset();
+            g_context.cursor.RequestReset();
+            ResetPendingCaptureGaps();
+        }
+        error = "无法完整关闭当前战斗日志，目录未切换";
+        return false;
+    }
+    if (!FinishReportLog("storage_path_changed", utc_ms)) {
+        candidate->Stop();
+        if (active) {
+            g_context.engine.Reset();
+            g_context.cursor.RequestReset();
+            ResetPendingCaptureGaps();
+        }
+        error = "无法完整关闭旧 Report，目录未切换";
+        return false;
+    }
+
+    if (!pending_settings->Commit(error)) {
+        candidate->Stop();
+        if (active) {
+            g_context.engine.Reset();
+            g_context.cursor.RequestReset();
+            ResetPendingCaptureGaps();
+        }
+        return false;
+    }
+
+    auto previous = std::move(g_context.log_worker);
+    g_context.log_worker = std::move(candidate);
+    g_context.log_root = target;
+    if (previous) previous->Stop();
+    if (active) {
+        g_context.engine.Reset();
+        g_context.cursor.RequestReset();
+        ResetPendingCaptureGaps();
+    }
+    CopyLogRootToInput(target);
+    return true;
+}
+
 AnomalyWebSocketServerInfoV1 QueryOverlayServerInfo() {
     AnomalyWebSocketServerInfoV1 info{sizeof(info)};
     if (g_context.websocket == nullptr || g_context.websocket->server_info == nullptr ||
@@ -631,6 +737,10 @@ void PublishOverlay(
     g_context.overlay_server_info = QueryOverlayServerInfo();
     const auto& server = g_context.overlay_server_info;
     g_context.overlay_policy.ObserveServer(now, server.connected_clients);
+    if (!stopping && server.port == 0) {
+        g_context.overlay_error = "WebSocket listener is unavailable";
+        return;
+    }
     if (!stopping && server.port != 0 && !g_context.overlay_launch_attempted) {
         g_context.overlay_launch_attempted = true;
         static_cast<void>(LaunchOverlay(
@@ -662,25 +772,27 @@ void ResetState() {
     g_context.log_session = {};
     g_context.participant_names.clear();
     g_context.observed_world = {};
-    g_context.pending_cursor_gap_first.reset();
-    g_context.pending_missing_sequence_ranges.clear();
-    g_context.pending_missing_ranges_truncated = false;
+    ResetPendingCaptureGaps();
     g_context.producer_instance_id.clear();
     g_context.overlay_snapshot_sequence = 0;
     g_context.local_overlay_drops = 0;
     g_context.overlay_policy.Reset();
     g_context.overlay_launch_attempted = false;
     g_context.overlay_restart_pending = false;
-    g_context.restart_overlay_requested = false;
+    g_context.toggle_overlay_requested = false;
+    g_context.open_log_root_requested = false;
+    g_context.requested_log_root.clear();
+    g_context.requested_overlay_settings.reset();
+    g_context.overlay_settings = {};
+    g_context.log_root_input.fill('\0');
+    g_context.next_settings_refresh = {};
+    g_context.settings_status.clear();
+    g_context.settings_error.clear();
     g_context.overlay_server_info = {sizeof(AnomalyWebSocketServerInfoV1)};
     g_context.overlay_error.clear();
     g_context.control_status.clear();
     std::scoped_lock lock(g_context.mutex);
     g_context.render = {};
-    g_context.reset_requested = false;
-    g_context.delete_request.clear();
-    g_context.pending_delete.clear();
-    g_context.expanded_reports.clear();
 }
 
 void CloseControlHandles() {
@@ -725,33 +837,105 @@ void Update(void* context, double) {
             g_context.overlay_snapshot_sequence), now, utc_ms);
     }
 
-    bool reset_requested{};
     const bool manual_end_requested = g_context.manual_end_event != nullptr &&
         WaitForSingleObject(g_context.manual_end_event, 0) == WAIT_OBJECT_0;
-    bool restart_overlay_requested{};
-    std::string delete_request;
+    bool toggle_overlay_requested{};
+    bool open_log_root_requested{};
+    std::string requested_log_root;
+    std::optional<nte::settings::OverlaySettings> requested_overlay_settings;
     {
         std::scoped_lock lock(g_context.mutex);
-        reset_requested = g_context.reset_requested;
-        g_context.reset_requested = false;
-        restart_overlay_requested = g_context.restart_overlay_requested;
-        g_context.restart_overlay_requested = false;
-        delete_request = std::move(g_context.delete_request);
-        g_context.delete_request.clear();
+        toggle_overlay_requested = std::exchange(
+            g_context.toggle_overlay_requested, false);
+        open_log_root_requested = std::exchange(
+            g_context.open_log_root_requested, false);
+        requested_log_root = std::move(g_context.requested_log_root);
+        g_context.requested_log_root.clear();
+        requested_overlay_settings = std::move(
+            g_context.requested_overlay_settings);
+        g_context.requested_overlay_settings.reset();
     }
-    if (restart_overlay_requested) {
-        g_context.overlay_launch_attempted = false;
-        g_context.overlay_restart_pending = true;
-        g_context.overlay_error.clear();
+
+    if (requested_overlay_settings) {
+        std::string error;
+        nte::settings::OverlaySettings merged;
+        if (nte::settings::UpdateOverlayPreferences(
+                nte::settings::OverlaySettingsPath(),
+                *requested_overlay_settings, merged, error)) {
+            g_context.overlay_settings = merged;
+            g_context.settings_status = "Overlay 设置已应用";
+            g_context.settings_error.clear();
+            NotifyOverlaySettingsChanged();
+        } else {
+            g_context.settings_error = "保存 Overlay 设置失败：" + error;
+        }
     }
-    if (!delete_request.empty() && g_context.log_worker) {
-        static_cast<void>(g_context.log_worker->DeleteReport(std::move(delete_request)));
+
+    if (toggle_overlay_requested) {
+        const auto action = nte::combat_stats::ResolveOverlayToggleAction(
+            g_context.overlay_policy.enabled(),
+            !g_context.overlay_error.empty());
+        if (action == nte::combat_stats::OverlayToggleAction::Retry) {
+            g_context.overlay_launch_attempted = false;
+            g_context.overlay_error.clear();
+            g_context.settings_status = "正在重试启动 Overlay";
+        } else if (action == nte::combat_stats::OverlayToggleAction::Disable) {
+            g_context.overlay_policy.SetEnabled(false);
+            g_context.overlay_launch_attempted = false;
+            CloseOverlayWindow();
+            g_context.settings_status = "Overlay 已关闭（下次启动仍会自动开启）";
+        } else {
+            g_context.overlay_policy.SetEnabled(true);
+            g_context.overlay_launch_attempted = false;
+            g_context.overlay_restart_pending = false;
+            g_context.overlay_error.clear();
+            g_context.settings_status = "正在启动 Overlay";
+        }
+        g_context.settings_error.clear();
     }
-    if (reset_requested || manual_end_requested) {
+
+    if (!requested_log_root.empty()) {
+        const auto path = nte::settings::PathFromUtf8(requested_log_root);
+        std::string error;
+        if (!path) {
+            g_context.settings_error = "存储路径不是有效的 UTF-8 路径";
+        } else if (SwitchLogRoot(*path, now, utc_ms, error)) {
+            g_context.settings_status = "统计数据存储路径已应用";
+            g_context.settings_error = std::move(error);
+        } else {
+            g_context.settings_error = std::move(error);
+        }
+    }
+
+    if (open_log_root_requested) {
+        std::string error;
+        if (!nte::settings::PrepareLogRoot(g_context.log_root, error)) {
+            g_context.settings_error = "无法打开数据文件夹：" + error;
+        } else if (reinterpret_cast<std::intptr_t>(ShellExecuteW(
+                nullptr, L"open", g_context.log_root.c_str(), nullptr,
+                nullptr, SW_SHOWNORMAL)) <= 32) {
+            g_context.settings_error = "无法打开数据文件夹";
+        }
+    }
+
+    if (now >= g_context.next_settings_refresh &&
+        !requested_overlay_settings) {
+        nte::settings::OverlaySettings refreshed = g_context.overlay_settings;
+        std::string error;
+        if (nte::settings::LoadOverlaySettings(
+                nte::settings::OverlaySettingsPath(), refreshed, error)) {
+            g_context.overlay_settings = refreshed;
+        } else if (!error.empty()) {
+            g_context.settings_error = "读取 Overlay 设置失败：" + error;
+        }
+        g_context.next_settings_refresh = now + std::chrono::seconds(1);
+    }
+
+    if (manual_end_requested) {
         bool may_reset = true;
         if (!g_context.log_session.encounter_id.empty()) {
             may_reset = FinishEncounterLog(
-                manual_end_requested ? "manual_end" : "manual_reset",
+                "manual_end",
                 MakeOverlaySnapshot(
                 g_context.engine.BuildSnapshot(now),
                 CaptureStatusCode(g_context.render.snapshot.get()),
@@ -761,16 +945,12 @@ void Update(void* context, double) {
                 g_context.log_session.encounter_id, utc_ms, false,
                 g_context.overlay_snapshot_sequence), now, utc_ms);
         }
-        if (manual_end_requested) {
-            g_context.control_status = may_reset
-                ? "manual_end_completed" : "manual_end_failed";
-        }
+        g_context.control_status = may_reset
+            ? "manual_end_completed" : "manual_end_failed";
         if (may_reset) {
             g_context.engine.Reset();
             g_context.cursor.RequestReset();
-            g_context.pending_cursor_gap_first.reset();
-            g_context.pending_missing_sequence_ranges.clear();
-            g_context.pending_missing_ranges_truncated = false;
+            ResetPendingCaptureGaps();
         }
     }
 
@@ -804,9 +984,7 @@ void Update(void* context, double) {
             const Handle observed_world = ConvertHandle(combatant.world);
             if (g_context.observed_world.id != 0 &&
                 observed_world != g_context.observed_world) {
-                g_context.pending_cursor_gap_first.reset();
-                g_context.pending_missing_sequence_ranges.clear();
-                g_context.pending_missing_ranges_truncated = false;
+                ResetPendingCaptureGaps();
             }
             g_context.observed_world = observed_world;
             if (!g_context.log_session.report_id.empty() &&
@@ -975,7 +1153,7 @@ void Update(void* context, double) {
     RenderState next;
     Snapshot stats = g_context.engine.BuildSnapshot(now);
     if (g_context.log_worker) next.log = g_context.log_worker->Status();
-    next.log_root = g_context.log_root.string();
+    next.log_root = nte::settings::PathToUtf8(g_context.log_root);
     const std::string report_id = g_context.log_session.report_id;
     const std::string encounter_id = g_context.log_session.encounter_id;
     PublishOverlay(stats, service_status, latest, report_id,
@@ -986,6 +1164,10 @@ void Update(void* context, double) {
             g_context.overlay_snapshot_sequence));
     next.overlay_error = g_context.overlay_error;
     next.name_resource_error = g_context.name_resource_error;
+    next.overlay_settings = g_context.overlay_settings;
+    next.overlay_enabled = g_context.overlay_policy.enabled();
+    next.settings_status = g_context.settings_status;
+    next.settings_error = g_context.settings_error;
     std::scoped_lock lock(g_context.mutex);
     g_context.render = std::move(next);
 }
@@ -1001,290 +1183,101 @@ void TextFormat(const AnomalyUiServiceV1* ui, const char* format, Args... args) 
     Text(ui, buffer.data());
 }
 
-void DrawAggregateTable(
-    const AnomalyUiServiceV1* ui,
-    const char* id,
-    const std::vector<AggregateRow>& rows,
-    const std::int64_t total) {
-    if (rows.empty()) {
-        Text(ui, "暂无数据");
-        return;
-    }
-    const bool table_available = HasField<AnomalyUiServiceV1,
-        decltype(AnomalyUiServiceV1::end_table)>(
-        ui, offsetof(AnomalyUiServiceV1, end_table));
-    if (!table_available || ui->begin_table == nullptr || ui->table_next_row == nullptr ||
-        ui->table_next_column == nullptr || ui->end_table == nullptr) {
-        for (const auto& row : rows) {
-            TextFormat(ui, "%s  %lld  %llu hits", row.label.c_str(),
-                static_cast<long long>(row.damage),
-                static_cast<unsigned long long>(row.positive_hits));
-        }
-        return;
-    }
-    if (!ui->begin_table(ui->user, anomaly::sdk::StringView(id), 6,
-            ANOMALY_UI_TABLE_V1_SIZING_FIXED_FIT, 0.0F, 0.0F)) return;
-    for (const auto& row : rows) {
-        ui->table_next_row(ui->user);
-        ui->table_next_column(ui->user); Text(ui, ShortName(row.label));
-        ui->table_next_column(ui->user); TextFormat(ui, "%lld", static_cast<long long>(row.damage));
-        ui->table_next_column(ui->user); TextFormat(ui, "%.1f%%", total > 0 ? row.damage * 100.0 / total : 0.0);
-        ui->table_next_column(ui->user); TextFormat(ui, "%llu", static_cast<unsigned long long>(row.positive_hits));
-        ui->table_next_column(ui->user); TextFormat(ui, "%.1f", row.positive_hits ? static_cast<double>(row.damage) / row.positive_hits : 0.0);
-        ui->table_next_column(ui->user); TextFormat(ui, "%lld", static_cast<long long>(row.maximum_hit));
-    }
-    ui->end_table(ui->user);
-}
-
-void DrawPlayerTable(const AnomalyUiServiceV1* ui, const std::vector<nte::combat_stats::PlayerRow>& rows) {
-    if (rows.empty()) {
-        Text(ui, "暂无已确认参战角色");
-        return;
-    }
-    for (const auto& row : rows) {
-        const double critical_rate = nte::combat_stats::PlayerCriticalRate(row);
-        const double head_rate = nte::combat_stats::PlayerHeadRate(row);
-        const double weak_rate = nte::combat_stats::PlayerWeakRate(row);
-        TextFormat(ui,
-            "%s  伤害 %lld  占比 %.1f%%  DPS %.1f  活跃 %.1f  10秒 %.1f  暴击 %.1f%%  爆头 %.1f%%  弱点 %.1f%%  最大 %lld (%s)",
-            ShortName(row.label).c_str(), static_cast<long long>(row.damage),
-            row.damage_share, row.encounter_dps, row.active_dps, row.rolling_dps,
-            critical_rate, head_rate, weak_rate, static_cast<long long>(row.maximum_hit),
-            ShortName(row.maximum_source_name).c_str());
-    }
-}
-
-void DrawOverview(const AnomalyUiServiceV1* ui, const RenderState& render) {
-    const Snapshot empty;
-    const Snapshot& stats = render.snapshot ? render.snapshot->combat : empty;
-    const NteOverlaySnapshot* overlay = render.snapshot.get();
-    TextFormat(ui, "状态：%s  持续：%.1f 秒  上场角色：%zu",
-        StateName(stats.state), stats.duration_seconds, stats.controlled_character_count);
-    TextFormat(ui, "输出：%lld  遭遇 DPS：%.1f  10秒 DPS：%.1f",
-        static_cast<long long>(stats.outgoing_damage), stats.encounter_dps, stats.rolling_dps);
-    TextFormat(ui, "输出命中：%llu  平均：%.1f  最大：%lld",
-        static_cast<unsigned long long>(stats.outgoing_positive_hits),
-        stats.outgoing_positive_hits ? static_cast<double>(stats.outgoing_damage) / stats.outgoing_positive_hits : 0.0,
-        static_cast<long long>(stats.maximum_outgoing_hit));
-    TextFormat(ui, "承伤：%lld  次数：%llu  非正值事件：%llu",
-        static_cast<long long>(stats.incoming_damage),
-        static_cast<unsigned long long>(stats.incoming_positive_hits),
-        static_cast<unsigned long long>(stats.non_positive_events));
-    TextFormat(ui, "HP：%.1f / %.1f  护盾：%.1f", stats.hp, stats.max_hp, stats.shield);
-    TextFormat(ui, "采集服务：%s  最新序列：%llu",
-        StatusName(CaptureStatusCode(overlay)),
-        static_cast<unsigned long long>(overlay ? overlay->latest_damage_sequence : 0));
-    TextFormat(ui, "Overlay：127.0.0.1:%u  客户端：%u  发布：%llu  丢弃：%llu",
-        static_cast<unsigned>(overlay ? overlay->websocket_port : 0),
-        static_cast<unsigned>(overlay ? overlay->connected_clients : 0),
-        static_cast<unsigned long long>(overlay ? overlay->published_messages : 0),
-        static_cast<unsigned long long>(
-            overlay ? overlay->transport_dropped_messages : 0));
-    if (!render.overlay_error.empty()) {
-        TextFormat(ui, "Overlay 启动错误：%s", render.overlay_error.c_str());
-    }
-    if (!render.name_resource_error.empty()) {
-        TextFormat(ui, "名称资源：不可用（%s），当前使用技术名称",
-            render.name_resource_error.c_str());
-    }
-    if (ui->button != nullptr && ui->button(
-            ui->user, anomaly::sdk::StringView("重新启动 Overlay"), 0.0F, 0.0F)) {
-        std::scoped_lock lock(g_context.mutex);
-        g_context.restart_overlay_requested = true;
-    }
-    TextFormat(ui, "日志：%s  队列：%zu  丢失：%llu",
-        render.log.running ? (render.log.ready ? "记录就绪" : "正在初始化") : "未运行",
-        render.log.queue_depth,
-        static_cast<unsigned long long>(render.log.dropped_events));
-    if (overlay && !overlay->report_id.empty()) {
-        std::uint64_t active_bytes{};
-        for (const auto& report : render.log.history) {
-            if (report.report_id == overlay->report_id) {
-                active_bytes = report.total_bytes;
-                break;
-            }
-        }
-        TextFormat(ui, "Report：%s  Encounter：%s",
-            overlay->report_id.c_str(), overlay->encounter_id.empty() ? "等待下一场" :
-            overlay->encounter_id.c_str());
-        TextFormat(ui, "当前日志大小：%.2f MiB",
-            static_cast<double>(active_bytes) / (1024.0 * 1024.0));
-    }
-    TextFormat(ui, "日志目录：%s", render.log_root.c_str());
-    if (!render.log.last_error.empty()) {
-        TextFormat(ui, "写入错误：%s", render.log.last_error.c_str());
-    }
-    if (stats.quality.partial || stats.quality.overflow ||
-        stats.quality.cursor_gap || stats.quality.aggregate_truncated) {
-        TextFormat(ui, "数据质量：%s%s%s%s",
-            stats.quality.partial ? "PARTIAL " : "",
-            stats.quality.overflow ? "OVERFLOW " : "",
-            stats.quality.cursor_gap ? "CURSOR_GAP " : "",
-            stats.quality.aggregate_truncated ? "AGGREGATE_LIMIT" : "");
-    }
-    if (stats.critical_data_status !=
-        nte::combat_stats::CriticalDataStatus::Available) {
-        TextFormat(ui, "暴击数据：%s（Anomaly 当前伤害采集源不提供完整暴击元数据）",
-            nte::combat_stats::CriticalDataStatusName(
-                stats.critical_data_status).data());
-    }
-}
-
-void DrawHistory(const AnomalyUiServiceV1* ui, const RenderState& render) {
-    if (!render.log.ready && render.log.history.empty()) {
-        Text(ui, "历史索引正在加载或不可用");
-        return;
-    }
-    if (render.log.history.empty()) {
-        Text(ui, "暂无已保存战斗日志");
-        return;
-    }
-    const std::size_t count = (std::min<std::size_t>)(50, render.log.history.size());
-    for (std::size_t index{}; index < count; ++index) {
-        const auto& report = render.log.history[index];
-        const std::string date = FormatUtcDate(report.started_utc_ms);
-        TextFormat(ui,
-            "Report %s  World %llu:%llu  %s  %s  遭遇：%llu  事件：%llu  %.2f MiB  %s",
-            report.report_id.c_str(),
-            static_cast<unsigned long long>(report.world.id),
-            static_cast<unsigned long long>(report.world.generation),
-            date.c_str(),
-            report.open ? "OPEN" : report.close_reason.c_str(),
-            static_cast<unsigned long long>(report.encounter_count),
-            static_cast<unsigned long long>(report.event_count),
-            static_cast<double>(report.total_bytes) / (1024.0 * 1024.0),
-            report.complete ? "完整" : "不完整");
-        bool expanded{};
-        {
-            std::scoped_lock lock(g_context.mutex);
-            expanded = g_context.expanded_reports.contains(report.report_id);
-        }
-        if (ui->button != nullptr) {
-            const std::string toggle = std::string(expanded ? "收起" : "展开") +
-                "##expand-" + report.report_id;
-            if (ui->button(ui->user, anomaly::sdk::StringView(toggle), 0.0F, 0.0F)) {
-                std::scoped_lock lock(g_context.mutex);
-                if (expanded) g_context.expanded_reports.erase(report.report_id);
-                else g_context.expanded_reports.insert(report.report_id);
-                expanded = !expanded;
-            }
-        }
-        if (expanded) for (const auto& encounter : report.encounters) {
-            TextFormat(ui, "  %s  %.1f秒  输出 %lld  承伤 %lld  DPS %.1f  %s  %s",
-                encounter.encounter_id.c_str(), encounter.duration_seconds,
-                static_cast<long long>(encounter.outgoing_damage),
-                static_cast<long long>(encounter.incoming_damage),
-                encounter.encounter_dps, encounter.end_reason.c_str(),
-                encounter.complete ? "完整" : "不完整");
-        }
-        if (!report.open && ui->button != nullptr) {
-            bool pending{};
-            {
-                std::scoped_lock lock(g_context.mutex);
-                pending = g_context.pending_delete == report.report_id;
-            }
-            if (!pending) {
-                const std::string label = "删除此 Report##" + report.report_id;
-                if (ui->button(ui->user, anomaly::sdk::StringView(label), 0.0F, 0.0F)) {
-                    std::scoped_lock lock(g_context.mutex);
-                    g_context.pending_delete = report.report_id;
-                }
-            } else {
-                const std::string confirm = "确认永久删除##" + report.report_id;
-                const std::string cancel = "取消删除##" + report.report_id;
-                if (ui->button(ui->user, anomaly::sdk::StringView(confirm), 0.0F, 0.0F)) {
-                    std::scoped_lock lock(g_context.mutex);
-                    g_context.delete_request = report.report_id;
-                    g_context.pending_delete.clear();
-                }
-                if (ui->button(ui->user, anomaly::sdk::StringView(cancel), 0.0F, 0.0F)) {
-                    std::scoped_lock lock(g_context.mutex);
-                    g_context.pending_delete.clear();
-                }
-            }
-        }
-    }
-}
-
 void Draw(void*, const AnomalyUiServiceV1* ui) {
     if (ui == nullptr) ui = g_context.ui;
     if (ui == nullptr || ui->begin_window == nullptr ||
         ui->end_window == nullptr || ui->text == nullptr) return;
     RenderState render;
+    std::array<char, kMaximumPathBytes> path_input{};
     {
         std::scoped_lock lock(g_context.mutex);
         render = g_context.render;
+        path_input = g_context.log_root_input;
     }
-    const Snapshot empty_stats;
-    const Snapshot& stats = render.snapshot ? render.snapshot->combat : empty_stats;
     int open = 1;
     anomaly::sdk::UiWindow window(ui, "NTE Combat Tracker", &open);
     if (!window) return;
+
+    Text(ui, "Overlay 设置");
     if (ui->button != nullptr && ui->button(
-            ui->user, anomaly::sdk::StringView("重置统计"), 0.0F, 0.0F)) {
+            ui->user, anomaly::sdk::StringView(
+                !render.overlay_error.empty() ? "重试启动 Overlay" :
+                    (render.overlay_enabled ? "关闭 Overlay" : "开启 Overlay")),
+            0.0F, 0.0F)) {
         std::scoped_lock lock(g_context.mutex);
-        g_context.reset_requested = true;
+        g_context.toggle_overlay_requested = true;
     }
 
-    const bool tabs = HasField<AnomalyUiServiceV1,
-            decltype(AnomalyUiServiceV1::end_tab_bar)>(
-            ui, offsetof(AnomalyUiServiceV1, end_tab_bar)) &&
-        ui->begin_tab_bar != nullptr && ui->begin_tab_item != nullptr &&
-        ui->end_tab_item != nullptr && ui->end_tab_bar != nullptr;
-    if (!tabs) {
-        DrawOverview(ui, render);
-        return;
-    }
-    if (ui->begin_tab_bar(ui->user, anomaly::sdk::StringView("combat-tabs"), 0)) {
-        if (ui->begin_tab_item(ui->user, anomaly::sdk::StringView("总览"), nullptr, 0, 1)) {
-            DrawOverview(ui, render);
-            ui->end_tab_item(ui->user);
-        }
-        if (ui->begin_tab_item(ui->user, anomaly::sdk::StringView("伤害来源"), nullptr, 0, 1)) {
-            DrawAggregateTable(ui, "sources", stats.outgoing_sources, stats.outgoing_damage);
-            ui->end_tab_item(ui->user);
-        }
-        if (ui->begin_tab_item(ui->user, anomaly::sdk::StringView("参与者"), nullptr, 0, 1)) {
-            Text(ui, "确认参战角色");
-            DrawPlayerTable(ui, stats.players);
-            Text(ui, "输出目标");
-            DrawAggregateTable(ui, "targets", stats.outgoing_targets, stats.outgoing_damage);
-            Text(ui, "承伤来源");
-            DrawAggregateTable(ui, "attackers", stats.incoming_sources, stats.incoming_damage);
-            ui->end_tab_item(ui->user);
-        }
-        if (ui->begin_tab_item(ui->user, anomaly::sdk::StringView("最近事件"), nullptr, 0, 1)) {
-            const std::size_t count = (std::min)(kMaximumRecentRows, stats.recent_events.size());
-            for (std::size_t offset{}; offset < count; ++offset) {
-                const auto& event = stats.recent_events[stats.recent_events.size() - 1 - offset];
-                const char* direction = event.direction == EventDirection::Both
-                    ? "双向" : (event.direction == EventDirection::Outgoing ? "输出" :
-                        (event.direction == EventDirection::Incoming ? "承伤" : "可见"));
-                const bool critical = (event.flags & ANOMALY_NTE_DAMAGE_V1_CRITICAL) != 0;
-                const bool head_hit = (event.flags & ANOMALY_NTE_DAMAGE_V1_HEAD_HIT) != 0;
-                const bool weak = (event.flags & ANOMALY_NTE_DAMAGE_V1_WEAK_UNBALANCE) != 0;
-                TextFormat(ui, "+%.3fs #%llu/t%llu [%s] final=%lld basic=%lld display=%lld%s%s%s%s  %s  %s -> %s",
-                    static_cast<double>(event.received_offset_us) / 1'000'000.0,
-                    static_cast<unsigned long long>(event.sequence),
-                    static_cast<unsigned long long>(event.tick_sequence),
-                    direction,
-                    static_cast<long long>(event.final_damage),
-                    static_cast<long long>(event.basic_damage),
-                    static_cast<long long>(event.display_damage),
-                    event.final_damage <= 0 ? " (不计DPS)" : "",
-                    critical ? " 暴击" : "", head_hit ? " 爆头" : "",
-                    weak ? " 弱点" : "",
-                    ShortName(event.source).c_str(), ShortName(event.attacker).c_str(),
-                    ShortName(event.victim).c_str());
+    auto settings = render.overlay_settings;
+    bool settings_changed{};
+    if (ui->checkbox != nullptr) {
+        const auto checkbox = [&](const char* label, bool& value) {
+            int checked = value ? 1 : 0;
+            if (ui->checkbox(ui->user, anomaly::sdk::StringView(label), &checked)) {
+                value = checked != 0;
+                settings_changed = true;
             }
-            if (count == 0) Text(ui, "暂无当前玩家相关事件");
-            ui->end_tab_item(ui->user);
+        };
+        checkbox("锁定 / 点击穿透", settings.locked);
+        checkbox("折叠", settings.collapsed);
+        checkbox("置顶", settings.topmost);
+        checkbox("离战隐藏", settings.hide_idle);
+    }
+    if (ui->slider_float != nullptr) {
+        settings_changed = ui->slider_float(ui->user,
+            anomaly::sdk::StringView("透明度"), &settings.opacity,
+            0.4F, 1.0F) != 0 || settings_changed;
+        settings_changed = ui->slider_float(ui->user,
+            anomaly::sdk::StringView("界面缩放"), &settings.ui_scale,
+            0.75F, 2.0F) != 0 || settings_changed;
+    }
+    if (settings_changed) {
+        std::scoped_lock lock(g_context.mutex);
+        g_context.requested_overlay_settings = settings;
+    }
+
+    if (ui->separator != nullptr) ui->separator(ui->user);
+    Text(ui, "统计数据存储");
+    const bool input_available = HasField<AnomalyUiServiceV1,
+            decltype(AnomalyUiServiceV1::input_text)>(
+            ui, offsetof(AnomalyUiServiceV1, input_text)) &&
+        ui->input_text != nullptr;
+    if (input_available) {
+        if (ui->input_text(ui->user, anomaly::sdk::StringView("存储路径"),
+                path_input.data(), path_input.size(), 0)) {
+            std::scoped_lock lock(g_context.mutex);
+            g_context.log_root_input = path_input;
         }
-        if (ui->begin_tab_item(ui->user, anomaly::sdk::StringView("历史"), nullptr, 0, 1)) {
-            DrawHistory(ui, render);
-            ui->end_tab_item(ui->user);
-        }
-        ui->end_tab_bar(ui->user);
+    } else {
+        TextFormat(ui, "存储路径：%s", render.log_root.c_str());
+    }
+    if (ui->button != nullptr && ui->button(
+            ui->user, anomaly::sdk::StringView("应用路径"), 0.0F, 0.0F)) {
+        std::scoped_lock lock(g_context.mutex);
+        g_context.requested_log_root = path_input.data();
+    }
+    if (HasField<AnomalyUiServiceV1,
+            decltype(AnomalyUiServiceV1::same_line)>(
+            ui, offsetof(AnomalyUiServiceV1, same_line)) &&
+        ui->same_line != nullptr) {
+        ui->same_line(ui->user, 0.0F, -1.0F);
+    }
+    if (ui->button != nullptr && ui->button(
+            ui->user, anomaly::sdk::StringView("打开数据文件夹"), 0.0F, 0.0F)) {
+        std::scoped_lock lock(g_context.mutex);
+        g_context.open_log_root_requested = true;
+    }
+    if (!render.settings_status.empty()) {
+        TextFormat(ui, "%s", render.settings_status.c_str());
+    }
+    if (!render.settings_error.empty()) {
+        TextFormat(ui, "设置错误：%s", render.settings_error.c_str());
+    }
+    if (!render.overlay_error.empty()) {
+        TextFormat(ui, "Overlay 启动错误：%s", render.overlay_error.c_str());
+    }
+    if (!render.log.last_error.empty()) {
+        TextFormat(ui, "存储错误：%s", render.log.last_error.c_str());
     }
 }
 
@@ -1327,7 +1320,30 @@ AnomalyStatusV1 ANOMALY_CALL Start(void* context) {
     if (g_context.manual_end_event != nullptr) ResetEvent(g_context.manual_end_event);
     if (g_context.plugin_stopping_event != nullptr) ResetEvent(g_context.plugin_stopping_event);
     g_context.producer_instance_id = nte::damage_log::GenerateUuidV4();
-    g_context.log_root = nte::damage_log::DefaultLogRoot();
+    const auto default_log_root = nte::damage_log::DefaultLogRoot();
+    std::string settings_error;
+    const auto plugin_settings = nte::settings::LoadPluginSettings(
+        nte::settings::PluginSettingsPath(), default_log_root, settings_error);
+    g_context.log_root = plugin_settings.log_root;
+    std::string prepare_error;
+    if (!nte::settings::PrepareLogRoot(g_context.log_root, prepare_error)) {
+        if (!settings_error.empty()) settings_error += "；";
+        settings_error += "配置目录不可用：" + prepare_error;
+        g_context.log_root = default_log_root;
+        std::string fallback_error;
+        if (!nte::settings::PrepareLogRoot(g_context.log_root, fallback_error)) {
+            settings_error += "；默认目录不可用：" + fallback_error;
+        }
+    }
+    if (!settings_error.empty()) g_context.settings_error = settings_error;
+    CopyLogRootToInput(g_context.log_root);
+    std::string overlay_settings_error;
+    static_cast<void>(nte::settings::LoadOverlaySettings(
+        nte::settings::OverlaySettingsPath(),
+        g_context.overlay_settings, overlay_settings_error));
+    if (!overlay_settings_error.empty()) {
+        g_context.settings_error = overlay_settings_error;
+    }
     if (!g_context.log_root.empty()) {
         g_context.log_worker = std::make_unique<nte::damage_log::DamageLogWorker>(
             g_context.log_root);

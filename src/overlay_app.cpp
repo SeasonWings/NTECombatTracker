@@ -1,4 +1,5 @@
 #include "attribute_color_map.hpp"
+#include "app_settings.hpp"
 #include "overlay_control.hpp"
 #include "overlay_model.hpp"
 #include "overlay_protocol.hpp"
@@ -32,8 +33,6 @@
 #include <thread>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-
 namespace {
 
 using Microsoft::WRL::ComPtr;
@@ -51,10 +50,10 @@ using nte::combat_stats::overlay::SortColumn;
 using nte::combat_stats::overlay::SortPlayers;
 using nte::combat_stats::overlay::ScaleWindowExtent;
 using nte::combat_stats::overlay::UnscaleWindowExtent;
+using nte::combat_stats::overlay::kWindowClassName;
+using nte::combat_stats::overlay::kWindowTitle;
 using namespace std::chrono_literals;
 
-constexpr wchar_t kWindowClass[] = L"NteCombatTracker.Window.v1";
-constexpr wchar_t kWindowTitle[] = L"NTE Combat Tracker";
 constexpr wchar_t kMutexName[] = L"Local\\NteCombatOverlay.local.nte.combat-stats";
 constexpr UINT kSnapshotMessage = WM_APP + 1;
 constexpr UINT kTrayMessage = WM_APP + 2;
@@ -65,6 +64,8 @@ constexpr UINT kHotkeyId = 1;
 constexpr UINT_PTR kStaleTimerId = 1;
 constexpr UINT kTrayId = 1;
 constexpr std::size_t kMaximumMessage = nte::combat_stats::kMaximumOverlayMessageBytes;
+UINT g_reload_settings_message{};
+UINT g_close_overlay_message{};
 
 enum MenuId : UINT {
     MenuToggleLock = 100,
@@ -82,7 +83,7 @@ enum MenuId : UINT {
     MenuExit,
 };
 
-enum class DataTab : std::uint8_t { Outgoing, Incoming };
+using DataTab = nte::settings::DataTab;
 enum class ViewPage : std::uint8_t { Live, HistoryList, HistoryDetail };
 enum class DrillLevel : std::uint8_t { Players, Sources, Events };
 enum class UiAction : std::uint8_t {
@@ -102,22 +103,6 @@ struct HitTarget {
     std::size_t index{};
 };
 
-struct Settings {
-    int x{100};
-    int y{100};
-    int width{560};
-    int height{400};
-    bool locked{};
-    bool collapsed{};
-    bool topmost{true};
-    bool hide_idle{};
-    float opacity{0.90F};
-    float ui_scale{1.0F};
-    SortColumn sort_column{SortColumn::Damage};
-    bool descending{true};
-    DataTab active_tab{DataTab::Outgoing};
-};
-
 struct RenderResources {
     ComPtr<ID2D1Factory> d2d;
     ComPtr<IDWriteFactory> write;
@@ -132,7 +117,7 @@ struct App {
     HWND window{};
     UINT taskbar_created{};
     std::uint16_t port{14514};
-    Settings settings;
+    nte::settings::OverlaySettings settings;
     std::filesystem::path settings_path;
     RenderResources render;
     std::jthread receiver;
@@ -269,48 +254,17 @@ std::string SourceKey(
         std::to_string(source.participant.generation);
 }
 
-std::filesystem::path SettingsPath() {
-    PWSTR local{};
-    if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr, &local))) {
-        return {};
-    }
-    std::filesystem::path result(local);
-    CoTaskMemFree(local);
-    return result / L"NTECombatStats" / L"overlay-settings.json";
-}
-
 bool LoadSettings() {
-    g_app.settings_path = SettingsPath();
-    std::ifstream stream(g_app.settings_path, std::ios::binary);
-    if (!stream) return false;
-    try {
-        const nlohmann::json json = nlohmann::json::parse(stream);
-        if (json.value("schema_version", 0) != 2) return false;
-        auto& value = g_app.settings;
-        value.x = json.value("x", value.x);
-        value.y = json.value("y", value.y);
-        value.width = std::clamp(json.value("width", value.width), 420, 1400);
-        value.height = std::clamp(json.value("height", value.height), 180, 1000);
-        value.locked = json.value("locked", value.locked);
-        value.collapsed = json.value("collapsed", value.collapsed);
-        value.topmost = json.value("topmost", value.topmost);
-        value.hide_idle = json.value("hide_idle", value.hide_idle);
-        value.opacity = std::clamp(json.value("opacity", value.opacity), 0.4F, 1.0F);
-        value.ui_scale = std::clamp(json.value("ui_scale", value.ui_scale), 0.75F, 2.0F);
-        value.sort_column = static_cast<SortColumn>(std::clamp(
-            json.value("sort_column", static_cast<int>(value.sort_column)), 0, 9));
-        value.descending = json.value("descending", value.descending);
-        if (!nte::combat_stats::overlay::IsOutgoingSummarySort(value.sort_column)) {
-            value.sort_column = SortColumn::Damage;
-            value.descending = true;
-        }
-        value.active_tab = static_cast<DataTab>(std::clamp(
-            json.value("active_tab", static_cast<int>(value.active_tab)), 0, 1));
-        return true;
-    } catch (...) {
-        // A malformed settings file is ignored; defaults remain usable.
-        return false;
+    g_app.settings_path = nte::settings::OverlaySettingsPath();
+    std::string error;
+    const bool loaded = nte::settings::LoadOverlaySettings(
+        g_app.settings_path, g_app.settings, error);
+    if (!nte::combat_stats::overlay::IsOutgoingSummarySort(
+            g_app.settings.sort_column)) {
+        g_app.settings.sort_column = SortColumn::Damage;
+        g_app.settings.descending = true;
     }
+    return loaded;
 }
 
 void SaveSettings() {
@@ -329,29 +283,9 @@ void SaveSettings() {
             g_app.settings.height = logical.height;
         }
     }
-    std::error_code error;
-    std::filesystem::create_directories(g_app.settings_path.parent_path(), error);
-    if (error) return;
-    const auto temporary = g_app.settings_path.parent_path() / L"overlay-settings.json.tmp";
-    const auto& value = g_app.settings;
-    nlohmann::json json{
-        {"schema_version", 2}, {"x", value.x}, {"y", value.y},
-        {"width", value.width}, {"height", value.height}, {"locked", value.locked},
-        {"collapsed", value.collapsed}, {"topmost", value.topmost},
-        {"hide_idle", value.hide_idle}, {"opacity", value.opacity},
-        {"ui_scale", value.ui_scale},
-        {"sort_column", static_cast<int>(value.sort_column)},
-        {"descending", value.descending}};
-    json["active_tab"] = static_cast<int>(value.active_tab);
-    {
-        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
-        if (!stream) return;
-        stream << json.dump(2) << '\n';
-        stream.flush();
-        if (!stream) return;
-    }
-    MoveFileExW(temporary.c_str(), g_app.settings_path.c_str(),
-        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    std::string error;
+    static_cast<void>(nte::settings::SaveOverlaySettings(
+        g_app.settings_path, g_app.settings, error));
 }
 
 void AddTrayIcon() {
@@ -1175,9 +1109,13 @@ void ReceiveSnapshots(const std::stop_token stop) {
 }
 
 void LoadHistoryData(const std::stop_token stop) {
-    nte::combat_stats::overlay::CombatLogReader reader(
-        nte::damage_log::DefaultLogRoot());
     while (!stop.stop_requested()) {
+        std::string settings_error;
+        const auto plugin_settings = nte::settings::LoadPluginSettings(
+            nte::settings::PluginSettingsPath(),
+            nte::damage_log::DefaultLogRoot(), settings_error);
+        nte::combat_stats::overlay::CombatLogReader reader(
+            plugin_settings.log_root);
         std::string history_error;
         auto history = reader.History(history_error);
         std::string live_report;
@@ -1546,8 +1484,67 @@ void HandleUiAction(const HitTarget& target) {
     RenderOverlay();
 }
 
+void ReloadSettingsFromDisk() {
+    const auto previous = g_app.settings;
+    int current_x = previous.x;
+    int current_y = previous.y;
+    int current_width = previous.width;
+    int current_height = previous.height;
+    RECT current_rect{};
+    if (GetWindowRect(g_app.window, &current_rect)) {
+        current_x = current_rect.left;
+        current_y = current_rect.top;
+        if (!previous.collapsed) {
+            const float current_dpi =
+                static_cast<float>(GetDpiForWindow(g_app.window)) / 96.0F;
+            const auto logical = UnscaleWindowExtent(
+                current_rect.right - current_rect.left,
+                current_rect.bottom - current_rect.top,
+                current_dpi, previous.ui_scale);
+            current_width = logical.width;
+            current_height = logical.height;
+        }
+    }
+    if (!LoadSettings()) return;
+    g_app.settings.x = current_x;
+    g_app.settings.y = current_y;
+    g_app.settings.width = current_width;
+    g_app.settings.height = current_height;
+    const float dpi = static_cast<float>(GetDpiForWindow(g_app.window)) / 96.0F;
+    const int collapsed_height = static_cast<int>(std::lround(
+        nte::combat_stats::overlay::OverlayReferenceMetrics().title_height));
+    const auto extent = ScaleWindowExtent(
+        g_app.settings.width,
+        g_app.settings.collapsed ? collapsed_height : g_app.settings.height,
+        dpi, g_app.settings.ui_scale);
+    if (previous.collapsed != g_app.settings.collapsed ||
+        previous.ui_scale != g_app.settings.ui_scale) {
+        SetWindowPos(g_app.window, nullptr, 0, 0, extent.width, extent.height,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    ApplyWindowMode();
+    if (previous.hide_idle != g_app.settings.hide_idle) {
+        std::optional<EncounterState> state;
+        {
+            std::scoped_lock lock(g_app.snapshot_mutex);
+            if (g_app.snapshot) state = g_app.snapshot->combat.state;
+        }
+        if (nte::combat_stats::overlay::ShouldHideOverlay(
+                g_app.settings.hide_idle, state)) {
+            ShowWindow(g_app.window, SW_HIDE);
+        }
+        else if (!g_app.settings.hide_idle) {
+            ShowWindow(g_app.window, SW_SHOWNOACTIVATE);
+        }
+    }
+    SaveSettings();
+    RenderOverlay();
+}
+
 LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == g_app.taskbar_created) { AddTrayIcon(); return 0; }
+    if (message == g_reload_settings_message) { ReloadSettingsFromDisk(); return 0; }
+    if (message == g_close_overlay_message) { DestroyWindow(window); return 0; }
     if (message == kRestartMessage) { DestroyWindow(window); return 0; }
     switch (message) {
     case WM_NCCALCSIZE:
@@ -1564,8 +1561,10 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         std::string control_status;
         {
             std::scoped_lock lock(g_app.snapshot_mutex);
-            hide = g_app.settings.hide_idle && g_app.snapshot &&
-                g_app.snapshot->combat.state == EncounterState::Idle;
+            hide = nte::combat_stats::overlay::ShouldHideOverlay(
+                g_app.settings.hide_idle,
+                g_app.snapshot ? std::optional{g_app.snapshot->combat.state} :
+                    std::nullopt);
             active = g_app.snapshot &&
                 g_app.snapshot->combat.state == EncounterState::Active;
             has_snapshot = g_app.snapshot.has_value();
@@ -1939,7 +1938,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (!mutex) return 1;
     const bool already_running = GetLastError() == ERROR_ALREADY_EXISTS;
     if (already_running) {
-        const HWND existing = FindWindowW(kWindowClass, kWindowTitle);
+        const HWND existing = FindWindowW(kWindowClassName, kWindowTitle);
         if (existing) {
             PostMessageW(existing, restart ? kRestartMessage : kShowMessage, 0, 0);
         }
@@ -1975,6 +1974,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_app.port = ParsePort();
     const DWORD host_process_id = ParseHostProcessId();
     g_app.taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
+    g_reload_settings_message = RegisterWindowMessageW(
+        nte::combat_stats::overlay::kReloadSettingsMessageName);
+    g_close_overlay_message = RegisterWindowMessageW(
+        nte::combat_stats::overlay::kCloseOverlayMessageName);
     static_cast<void>(LoadSettings());
     if (!InitializeRendering()) { CoUninitialize(); CloseHandle(mutex); return 2; }
 
@@ -1982,7 +1985,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     window_class.lpfnWndProc = WindowProcedure;
     window_class.hInstance = instance;
     window_class.hCursor = nullptr;
-    window_class.lpszClassName = kWindowClass;
+    window_class.lpszClassName = kWindowClassName;
     if (!RegisterClassExW(&window_class)) { CoUninitialize(); CloseHandle(mutex); return 3; }
     const int collapsed_height = static_cast<int>(std::lround(
         nte::combat_stats::overlay::OverlayReferenceMetrics().title_height));
@@ -1992,7 +1995,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         static_cast<float>(GetDpiForSystem()) / 96.0F,
         g_app.settings.ui_scale);
     g_app.window = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-        kWindowClass, kWindowTitle, WS_POPUP | WS_THICKFRAME,
+        kWindowClassName, kWindowTitle, WS_POPUP | WS_THICKFRAME,
         g_app.settings.x, g_app.settings.y, initial_extent.width, initial_extent.height,
         nullptr, nullptr, instance, nullptr);
     if (!g_app.window) { CoUninitialize(); CloseHandle(mutex); return 4; }
