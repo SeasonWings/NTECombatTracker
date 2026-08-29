@@ -51,16 +51,19 @@ void SortsEachSupportedMetricStably() {
 
 void LayoutScalesAndCapsRows() {
     const auto normal = CalculateLayout(560.0F, 400.0F, 1.0F, false, 10);
-    Check(normal.title_height == 46.0F && normal.header_height == 28.0F &&
-              normal.footer_height == 32.0F,
+    Check(normal.title_height == 34.0F && normal.header_height == 28.0F &&
+              normal.row_height == 24.0F && normal.footer_height == 24.0F,
           "default title and header dimensions match the design");
-    Check(normal.visible_rows == 9, "rows are clipped above the fixed footer");
+    Check(normal.visible_rows == 10, "rows are clipped above the fixed footer");
     const auto dpi = CalculateLayout(840.0F, 600.0F, 1.5F, false, 10);
-    Check(dpi.visible_rows == 9 && dpi.resize_grip == 18.0F,
+    Check(dpi.visible_rows == 10 && dpi.resize_grip == 15.0F,
           "DPI scaling preserves logical row count and hit targets");
     const auto dpi200 = CalculateLayout(1120.0F, 800.0F, 2.0F, false, 10);
-    Check(dpi200.visible_rows == 9 && dpi200.title_height == 92.0F,
+    Check(dpi200.visible_rows == 10 && dpi200.title_height == 68.0F,
           "200 percent DPI preserves logical layout proportions");
+    const auto compact = CalculateLayout(520.0F, 220.0F, 1.0F, false, 10);
+    Check(compact.visible_rows == 5,
+          "compact layout should expose five rows at the persisted reference extent");
     const auto collapsed = CalculateLayout(520.0F, 220.0F, 1.0F, true, 10);
     Check(collapsed.visible_rows == 0 && collapsed.header_height == 0.0F,
           "collapsed layout only exposes the title bar");
@@ -85,28 +88,50 @@ void ReferenceVisualModelIsDeterministic() {
               PlayerBarFraction(800, 500) == 1.0 && PlayerBarFraction(10, 0) == 0.0,
           "damage bars should be normalized to the highest visible damage");
     const auto& columns = OutgoingSummaryColumns();
-    Check(columns[0].label == L"角色" && columns[1].label == L"总伤害" &&
+    Check(columns.size() == 5 &&
+              columns[0].label == L"角色" && columns[1].label == L"总伤害" &&
               columns[2].label == L"DPS" && columns[3].label == L"DPS%" &&
-              columns[4].label == L"暴击%" && columns[5].label == L"最高伤害",
+              columns[4].label == L"最高伤害",
           "outgoing summary columns should match the fixed reference order");
     Check(IsOutgoingSummarySort(SortColumn::Damage) &&
+              !IsOutgoingSummarySort(SortColumn::CriticalRate) &&
               !IsOutgoingSummarySort(SortColumn::HeadRate),
           "restored sorting should be limited to visible summary columns");
     Check(RoundedPercent(33.333) == 33 && RoundedPercent(66.667) == 67,
           "summary percentages should use integer rounding");
-    Check(PlayerNameInset(1.0F) == 28.0F && PlayerNameInset(1.5F) == 42.0F,
+    Check(PlayerNameInset(1.0F) == 24.0F && PlayerNameInset(1.5F) == 36.0F,
           "player labels should reserve scaled space for the colored glyph");
     const FooterData footer{3, 1811.4, 24, 2, 900.2};
     Check(FooterSummary(FooterPage::Live, footer) == L"3人｜1811dps" &&
               FooterSummary(FooterPage::HistoryList, footer) == L"24场历史战斗" &&
               FooterSummary(FooterPage::HistoryDetail, footer) == L"2人｜900dps",
           "footer text should use the active page data source");
-    const auto title = CalculateTitleBarLayout(560.0F, 1.0F, 46.0F);
-    Check(title.history.left == 6.0F && title.history.right == 38.0F &&
-              title.manual_end.left == 40.0F && title.manual_end.right == 82.0F &&
-              title.target.right == 494.0F && title.collapse.left == 496.0F &&
-              title.menu.right == 556.0F,
+    const auto title = CalculateTitleBarLayout(560.0F, 1.0F, 34.0F);
+    Check(title.history.left == 4.0F && title.history.right == 32.0F &&
+              title.manual_end.left == 34.0F && title.manual_end.right == 70.0F &&
+              title.time.left == 72.0F && title.title.left == 124.0F &&
+              title.target.left == 216.0F && title.target.right == 508.0F &&
+              title.collapse.left == 510.0F && title.collapse.right == 534.0F &&
+              title.collapse.top == 0.0F && title.collapse.bottom == 34.0F &&
+              title.menu.left == 536.0F && title.menu.right == 558.0F,
           "title controls should use the immutable reference layout");
+
+    for (const float scale : {1.0F, 1.25F, 1.5F}) {
+        const float width = 420.0F * scale;
+        const auto scaled_title = CalculateTitleBarLayout(
+            width, scale, 34.0F * scale);
+        Check(scaled_title.history.left >= 0.0F &&
+                  scaled_title.history.right <= scaled_title.manual_end.left &&
+                  scaled_title.manual_end.right <= scaled_title.time.left &&
+                  scaled_title.time.right <= scaled_title.title.left &&
+                  scaled_title.title.right <= scaled_title.target.left &&
+                  scaled_title.target.right <= scaled_title.collapse.left &&
+                  scaled_title.collapse.right <= scaled_title.menu.left &&
+                  scaled_title.menu.right <= width &&
+                  scaled_title.collapse.top == 0.0F &&
+                  scaled_title.collapse.bottom == 34.0F * scale,
+              "scaled title controls should stay ordered and vertically centered");
+    }
 }
 
 void LiveAndHistoricalRowsResolveTheSameAttributeColor() {
@@ -144,35 +169,41 @@ void TextAndFooterLayoutMatchTheOverlayContract() {
           "cell, title, breadcrumb, and tab text should be centered");
     Check(styles.footer_text.alignment == TextAlignment::Trailing,
           "footer encounter summary should be right aligned");
+    Check(styles.regular_text.logical_size == 12.0F &&
+              styles.small_text.logical_size == 11.0F &&
+              styles.bold_text.logical_size == 12.0F &&
+              styles.tab_text.logical_size == 12.0F &&
+              styles.footer_text.logical_size == 12.0F,
+          "compact text styles should match the reference density");
     Check(styles.history_icon_text.alignment == TextAlignment::Center &&
-              styles.history_icon_text.logical_size == 20.0F &&
+              styles.history_icon_text.logical_size == 18.0F &&
               styles.history_icon_text.font_family == L"Segoe UI Symbol",
-          "history icon should use a centered 20 pixel symbol style");
+          "history icon should use a centered compact symbol style");
 
-    const ViewRect cell{0.0F, 46.0F, 170.0F, 74.0F};
+    const ViewRect cell{0.0F, 34.0F, 170.0F, 62.0F};
     const auto centered = CalculateCellTextRect(cell, 1.0F, 0.0F);
-    Check(centered.left == 6.0F && centered.right == 164.0F &&
+    Check(centered.left == 4.0F && centered.right == 166.0F &&
               (centered.left + centered.right) / 2.0F == 85.0F,
           "ordinary cells should use symmetric horizontal padding");
     const auto player_name = CalculateCellTextRect(cell, 1.0F, PlayerNameInset(1.0F));
     const auto glyph = CalculatePlayerGlyphRect(cell, 1.0F);
-    Check(glyph.left == 2.0F && glyph.right == 26.0F &&
-              player_name.left == 34.0F && glyph.right < player_name.left,
+    Check(glyph.left == 2.0F && glyph.right == 22.0F &&
+              player_name.left == 28.0F && glyph.right < player_name.left,
           "player glyph and centered player name should not overlap");
 
     const auto footer = CalculateFooterLayout(
-        420.0F, 180.0F, 1.0F, 32.0F, 12.0F, true);
-    Check(footer.outgoing_tab.left == 0.0F && footer.outgoing_tab.right == 58.0F &&
-              footer.incoming_tab.left == 58.0F && footer.incoming_tab.right == 116.0F,
+        420.0F, 180.0F, 1.0F, 24.0F, 10.0F, true);
+    Check(footer.outgoing_tab.left == 0.0F && footer.outgoing_tab.right == 48.0F &&
+              footer.incoming_tab.left == 48.0F && footer.incoming_tab.right == 96.0F,
           "minimum-width footer should preserve both tabs");
-    Check(footer.summary.left == 120.0F && footer.summary.right == 404.0F &&
+    Check(footer.summary.left == 100.0F && footer.summary.right == 406.0F &&
               footer.summary.right < footer.resize_grip.left,
           "footer summary should extend to the right safe margin without covering resize");
 
     for (const float scale : {1.0F, 1.25F, 1.5F}) {
         const auto scaled = CalculateFooterLayout(
             420.0F * scale, 180.0F * scale, scale,
-            32.0F * scale, 12.0F * scale, true);
+            24.0F * scale, 10.0F * scale, true);
         Check(scaled.incoming_tab.right <= scaled.summary.left &&
                   scaled.summary.right < scaled.resize_grip.left,
               "scaled footer tabs, summary, and resize grip should not overlap");

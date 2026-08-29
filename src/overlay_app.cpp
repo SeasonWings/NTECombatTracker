@@ -630,13 +630,6 @@ void RenderOverlay() {
         time = std::format(L"{:02}:{:02}", seconds / 60, seconds % 60);
         target_name = Utf16(history_detail->summary.end_reason);
         if (!history_detail->summary.complete) target_name += L" ⚠ 数据不完整";
-        if (history_detail->summary.critical_data_status ==
-            nte::combat_stats::CriticalDataStatus::Unavailable) {
-            target_name += L"｜暴击数据不可用";
-        } else if (history_detail->summary.critical_data_status ==
-                   nte::combat_stats::CriticalDataStatus::Partial) {
-            target_name += L"｜暴击数据不完整";
-        }
     } else if (g_app.page == ViewPage::HistoryList) {
         target_name = std::format(L"{} 场已结束战斗", history.size());
     } else if (snapshot) {
@@ -648,13 +641,6 @@ void RenderOverlay() {
         if (snapshot->combat.quality.partial || snapshot->combat.quality.overflow ||
             snapshot->combat.quality.cursor_gap ||
             snapshot->combat.quality.aggregate_truncated) target_name += L" ⚠";
-        if (snapshot->combat.critical_data_status ==
-            nte::combat_stats::CriticalDataStatus::Unavailable) {
-            target_name += L"｜暴击数据不可用";
-        } else if (snapshot->combat.critical_data_status ==
-                   nte::combat_stats::CriticalDataStatus::Partial) {
-            target_name += L"｜暴击数据不完整";
-        }
     }
     if (!g_app.action_status.empty()) target_name = Utf16(g_app.action_status);
     if (!g_app.name_resource_error.empty()) target_name += L"｜名称资源不可用";
@@ -666,8 +652,21 @@ void RenderOverlay() {
     DrawTextLine(target.Get(), scaled_regular.Get(), muted.Get(), target_name,
         to_d2d_rect(title_layout.target));
     const D2D1_RECT_F collapse_rect = to_d2d_rect(title_layout.collapse);
-    DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(),
-        g_app.settings.collapsed ? L"⌄" : L"⌃", collapse_rect);
+    const float collapse_center_x = (collapse_rect.left + collapse_rect.right) / 2.0F;
+    const float collapse_center_y = (collapse_rect.top + collapse_rect.bottom) / 2.0F;
+    const float collapse_outer_y = collapse_center_y +
+        (g_app.settings.collapsed ? -2.0F : 2.0F) * scale;
+    const float collapse_tip_y = collapse_center_y +
+        (g_app.settings.collapsed ? 2.0F : -2.0F) * scale;
+    const D2D1_POINT_2F collapse_tip =
+        D2D1::Point2F(collapse_center_x, collapse_tip_y);
+    const float collapse_stroke = (std::max)(1.0F, 1.5F * scale);
+    target->DrawLine(
+        D2D1::Point2F(collapse_center_x - 4.0F * scale, collapse_outer_y),
+        collapse_tip, text.Get(), collapse_stroke);
+    target->DrawLine(collapse_tip,
+        D2D1::Point2F(collapse_center_x + 4.0F * scale, collapse_outer_y),
+        text.Get(), collapse_stroke);
     add_target(collapse_rect, UiAction::ToggleCollapsed);
     const D2D1_RECT_F menu_rect = to_d2d_rect(title_layout.menu);
     DrawTextLine(target.Get(), scaled_bold.Get(), text.Get(), L"⋮", menu_rect);
@@ -924,8 +923,6 @@ void RenderOverlay() {
                             std::format(L"{:.0f}", player.encounter_dps),
                             std::format(L"{}%", nte::combat_stats::overlay::RoundedPercent(
                                 player.damage_share)),
-                            std::format(L"{}%", nte::combat_stats::overlay::RoundedPercent(
-                                PlayerCriticalRate(player))),
                             std::format(L"{} {}", player.maximum_hit,
                                 Utf16(player.maximum_source_display_name.empty()
                                     ? player.maximum_source_name

@@ -81,8 +81,8 @@ ReferenceTheme OverlayReferenceTheme() noexcept {
 
 ReferenceMetrics OverlayReferenceMetrics() noexcept {
     return {
-        46.0F, 28.0F, 30.0F, 32.0F, 12.0F, 28.0F,
-        6.0F, 2.0F, 26.0F, 20.0F, 58.0F, 4.0F, 4.0F,
+        34.0F, 28.0F, 24.0F, 24.0F, 10.0F, 24.0F,
+        4.0F, 2.0F, 22.0F, 18.0F, 48.0F, 4.0F, 4.0F,
     };
 }
 
@@ -90,11 +90,11 @@ OverlayTextStyles OverlayReferenceTextStyles() noexcept {
     const auto metrics = OverlayReferenceMetrics();
     constexpr std::wstring_view ui_font = L"Microsoft YaHei UI";
     return {
-        {ui_font, 14.0F, TextAlignment::Center},
         {ui_font, 12.0F, TextAlignment::Center},
-        {ui_font, 14.0F, TextAlignment::Center},
-        {ui_font, 14.0F, TextAlignment::Center},
-        {ui_font, 14.0F, TextAlignment::Trailing},
+        {ui_font, 11.0F, TextAlignment::Center},
+        {ui_font, 12.0F, TextAlignment::Center},
+        {ui_font, 12.0F, TextAlignment::Center},
+        {ui_font, 12.0F, TextAlignment::Trailing},
         {L"Segoe UI Symbol", metrics.history_icon_font_size, TextAlignment::Center},
     };
 }
@@ -107,15 +107,17 @@ TitleBarLayout CalculateTitleBarLayout(
     const float safe_width = std::max(0.0F, width);
     const float safe_height = std::max(0.0F, title_height);
     return {
-        {6 * safe_scale, 5 * safe_scale, 38 * safe_scale, safe_height - 5 * safe_scale},
-        {40 * safe_scale, 7 * safe_scale, 82 * safe_scale, safe_height - 7 * safe_scale},
-        {84 * safe_scale, 0, 146 * safe_scale, safe_height},
-        {146 * safe_scale, 0, 252 * safe_scale, safe_height},
-        {252 * safe_scale, 0, safe_width - 66 * safe_scale, safe_height},
-        {safe_width - 64 * safe_scale, 4 * safe_scale,
-            safe_width - 34 * safe_scale, safe_height - 4 * safe_scale},
-        {safe_width - 32 * safe_scale, 4 * safe_scale,
-            safe_width - 4 * safe_scale, safe_height - 4 * safe_scale},
+        {4 * safe_scale, 4 * safe_scale, 32 * safe_scale,
+            safe_height - 4 * safe_scale},
+        {34 * safe_scale, 5 * safe_scale, 70 * safe_scale,
+            safe_height - 5 * safe_scale},
+        {72 * safe_scale, 0, 124 * safe_scale, safe_height},
+        {124 * safe_scale, 0, 216 * safe_scale, safe_height},
+        {216 * safe_scale, 0, safe_width - 52 * safe_scale, safe_height},
+        {safe_width - 50 * safe_scale, 0,
+            safe_width - 26 * safe_scale, safe_height},
+        {safe_width - 24 * safe_scale, 0,
+            safe_width - 2 * safe_scale, safe_height},
     };
 }
 
@@ -212,13 +214,12 @@ double PlayerBarFraction(
         static_cast<double>(maximum_damage), 0.0, 1.0);
 }
 
-const std::array<SummaryColumn, 6>& OutgoingSummaryColumns() noexcept {
-    static constexpr std::array<SummaryColumn, 6> columns{{
+const std::array<SummaryColumn, 5>& OutgoingSummaryColumns() noexcept {
+    static constexpr std::array<SummaryColumn, 5> columns{{
         {L"角色", SortColumn::Character, 1.7F},
         {L"总伤害", SortColumn::Damage, 1.05F},
         {L"DPS", SortColumn::EncounterDps, 0.85F},
         {L"DPS%", SortColumn::Share, 0.8F},
-        {L"暴击%", SortColumn::CriticalRate, 0.8F},
         {L"最高伤害", SortColumn::MaximumHit, 1.7F},
     }};
     return columns;

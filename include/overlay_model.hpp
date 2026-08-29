@@ -222,7 +222,7 @@ void ReconcileLiveNavigation(
     const AttributeColorMap& colors);
 [[nodiscard]] double PlayerBarFraction(
     std::int64_t damage, std::int64_t maximum_damage) noexcept;
-[[nodiscard]] const std::array<SummaryColumn, 6>& OutgoingSummaryColumns() noexcept;
+[[nodiscard]] const std::array<SummaryColumn, 5>& OutgoingSummaryColumns() noexcept;
 [[nodiscard]] bool IsOutgoingSummarySort(SortColumn column) noexcept;
 [[nodiscard]] long long RoundedPercent(double value) noexcept;
 [[nodiscard]] float PlayerNameInset(float scale) noexcept;
