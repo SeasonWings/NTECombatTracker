@@ -119,10 +119,10 @@
 - 未知技能：详情页依次尝试 GE/GA 本地化名、非技术 `damage_name`、普通稳定标签；全部失败时显示 `Unmapped Skill`。[来源：详情技能回退](https://github.com/kongbaiz/nte-dps-toolkit/blob/bff9f569ae19fc659b61a3a810407c01be5fc71a/src-tauri/src/contract/main_dps_detail.rs#L880-L941)
 - 当前语言缺名：`ability_tips` 会跨语言回退，因此简中 UI 中的新技能可能显示英文或日文，而不是空白。[来源：语言字段优先级](https://github.com/kongbaiz/nte-dps-toolkit/blob/bff9f569ae19fc659b61a3a810407c01be5fc71a/src/engine/parser.rs#L1201-L1252)
 
-## 6. 对 `NTECombatTools` 的直接启示
+## 6. 对 `NTE Combat Tracker` 的直接启示
 
 `nte-dps-toolkit` 证明了一条可行但有版本维护成本的路线：从已授权导出的官方资源构建本地版本化字典，运行时只用稳定技术标识做 join。
 
-它不能直接证明 Anomaly 的 `source_id` 等于抓包中的 GameplayEffect `UniqueIndex`。当前 `NTECombatTools` 更适合继续以 Anomaly 已提供的 `participant_path_utf8` 和 `source_name_utf8` 技术路径作为身份键；若要复用对方思路，应建立“技术路径/GE 名 → 官方导出表 → 中文显示名”的离线生成链，而不是把 `source_id` 强行套入对方的数字映射表。
+它不能直接证明 Anomaly 的 `source_id` 等于抓包中的 GameplayEffect `UniqueIndex`。当前 `NTE Combat Tracker` 更适合继续以 Anomaly 已提供的 `participant_path_utf8` 和 `source_name_utf8` 技术路径作为身份键；若要复用对方思路，应建立“技术路径/GE 名 → 官方导出表 → 中文显示名”的离线生成链，而不是把 `source_id` 强行套入对方的数字映射表。
 
 此外，对方的中文数据并非运行时自动发现：游戏版本更新后仍需要重新导出、核对映射覆盖率，并保留未知值和数据版本提示。

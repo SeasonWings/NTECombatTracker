@@ -1,4 +1,4 @@
-# NTE Combat Stats
+# NTE Combat Tracker
 
 Anomaly v1.7.0 的只读游戏内战斗统计、本地日志和纯 Win32 Overlay 插件。它消费 `anomaly.nte.combat`，显示当前玩家队伍轮换期间的输出、承伤、遭遇 DPS、10 秒 DPS、伤害来源、参与者和最近事件，并将遭遇内宿主可见的完整伤害事件保存为可重放 JSON Lines。
 
@@ -18,7 +18,7 @@ Anomaly v1.7.0 的只读游戏内战斗统计、本地日志和纯 Win32 Overlay
 
 脚本默认清理并重建仓库根目录下的 `build/`，避免不同 CMake 生成器或旧包文件相互污染；确认现有缓存兼容时可传入 `-Incremental`。
 
-全部配置、编译和打包暂存文件位于 `build/`；可校验插件目录为 `build/package/NteCombatStats/`。唯一最终交付物输出到 `dist/NteCombatStats-<version>-Release.zip`。ZIP 内不额外嵌套目录，结构固定为：
+全部配置、编译和打包暂存文件位于 `build/`；可校验插件目录为 `build/package/NteCombatTracker/`。唯一最终交付物输出到 `dist/NteCombatTracker-<version>-Release.zip`。ZIP 内不额外嵌套目录，结构固定为：
 
 ```text
 ├── locales/
@@ -28,7 +28,7 @@ Anomaly v1.7.0 的只读游戏内战斗统计、本地日志和纯 Win32 Overlay
 │   ├── icons/
 │   ├── images/
 │   └── languages/
-├── NteCombatOverlay.exe
+├── NteCombatTracker.exe
 ├── THIRD_PARTY_NOTICES.txt
 ├── manifest.json
 └── plugin.dll
@@ -37,11 +37,11 @@ Anomaly v1.7.0 的只读游戏内战斗统计、本地日志和纯 Win32 Overlay
 脚本默认已经执行 `ctest` 和插件包校验。需要单独复查暂存包时可执行：
 
 ```powershell
-anomaly-plugin validate .\build\package\NteCombatStats
-anomaly-test-host --plugin .\build\package\NteCombatStats --reload 10 --ticks 60
+anomaly-plugin validate .\build\package\NteCombatTracker
+anomaly-test-host --plugin .\build\package\NteCombatTracker --reload 10 --ticks 60
 ```
 
-将包目录复制到游戏 Runtime 的 `Anomaly/plugins/NteCombatStats/` 后启用插件。
+将包目录复制到游戏 Runtime 的 `Anomaly/plugins/NteCombatTracker/` 后启用插件。
 
 ## 统计语义
 
@@ -55,7 +55,7 @@ anomaly-test-host --plugin .\build\package\NteCombatStats --reload 10 --ticks 60
 
 ## Win32 Overlay
 
-插件从自身包目录自动启动 `NteCombatOverlay.exe`。Overlay 默认 560×400、透明置顶，采用紧凑深灰表格、稳定角色配色和伤害比例条，支持输出/承伤页签、角色→技能来源→逐次命中的同窗钻取，以及只读历史战斗查看。标题栏可手动结束当前统计；结束后实时页清空，结果保存到历史。
+插件从自身包目录自动启动 `NteCombatTracker.exe`。Overlay 默认 560×400、透明置顶，采用紧凑深灰表格、稳定角色配色和伤害比例条，支持输出/承伤页签、角色→技能来源→逐次命中的同窗钻取，以及只读历史战斗查看。标题栏可手动结束当前统计；结束后实时页清空，结果保存到历史。
 
 - 输出首页固定显示角色、总伤害、DPS、DPS%、暴击%和最高伤害来源；暴击%只统计最终伤害大于 0 的输出事件。
 
@@ -64,7 +64,7 @@ anomaly-test-host --plugin .\build\package\NteCombatStats --reload 10 --ticks 60
 - `Ctrl+Shift+F12` 切换锁定。锁定后窗口不激活并允许鼠标穿透。
 - Overlay 不会强制显示游戏当前隐藏的光标；游戏进程或插件停止时会立即退出。
 - 托盘菜单可显示、隐藏、解锁和退出。
-- 配置保存在 `%LOCALAPPDATA%\NTECombatStats\overlay-settings.json`。
+- 为兼容已有安装，配置继续保存在稳定数据目录 `%LOCALAPPDATA%\NTECombatStats\overlay-settings.json`。
 - Overlay 只接收自有 `NteOverlaySnapshot`，不使用 ACT `CombatData`、OverlayPlugin、CEF 或 WebView2。
 
 ## 本地日志

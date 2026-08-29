@@ -582,10 +582,10 @@ bool LaunchOverlay(
         return false;
     }
     const std::filesystem::path executable = std::filesystem::weakly_canonical(
-        root / L"NteCombatOverlay.exe", error);
+        root / L"NteCombatTracker.exe", error);
     if (error || executable.parent_path() != root ||
         !std::filesystem::is_regular_file(executable, error) || error) {
-        error_message = "NteCombatOverlay.exe is missing or outside the plugin package";
+        error_message = "NteCombatTracker.exe is missing or outside the plugin package";
         return false;
     }
     std::wstring command = L"\"" + executable.wstring() + L"\" --port " +
@@ -1239,7 +1239,7 @@ void Draw(void*, const AnomalyUiServiceV1* ui) {
     const Snapshot empty_stats;
     const Snapshot& stats = render.snapshot ? render.snapshot->combat : empty_stats;
     int open = 1;
-    anomaly::sdk::UiWindow window(ui, "NTE Combat Stats", &open);
+    anomaly::sdk::UiWindow window(ui, "NTE Combat Tracker", &open);
     if (!window) return;
     if (ui->button != nullptr && ui->button(
             ui->user, anomaly::sdk::StringView("重置统计"), 0.0F, 0.0F)) {
@@ -1419,7 +1419,7 @@ ANOMALY_SDK_EXPORT AnomalyStatusV1 ANOMALY_CALL AnomalyPluginEntryV1(
     *descriptor = {
         sizeof(*descriptor), ANOMALY_PLUGIN_API_V1_MAJOR, ANOMALY_PLUGIN_API_V1_MINOR,
         anomaly::sdk::StringView("local.nte.combat-stats"),
-        anomaly::sdk::StringView("NTE Combat Stats"),
+        anomaly::sdk::StringView("NTE Combat Tracker"),
         anomaly::sdk::StringView("Shikari"),
         anomaly::sdk::StringView("0.4.0"),
         Load, Start, Stop, Unload, Update, Draw};

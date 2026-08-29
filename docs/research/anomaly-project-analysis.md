@@ -9,9 +9,9 @@
 
 Anomaly 不是一个单用途的“战斗统计器”，而是一个注入《异环》（Neverness to Everness，NTE）进程的 **Windows x64 原生插件平台与 UE5/NTE 适配运行时**。它通过 `dwmapi.dll` 代理或启动器实时附加把 `Anomaly.Core.dll` 带入 `HTGame.exe`，在进程内提供生命周期、线程调度、Hook、D3D12/ImGui UI、插件包管理、诊断、UE5/NTE 语义服务和稳定的纯 C ABI v1。项目 README 将定位明确写为“面向研究、诊断与插件开发”，同时明确提示崩溃、数据损坏和封号风险。[来源：README](https://github.com/AnomalyNTE/Anomaly/blob/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/README.md)
 
-对当前名为 `NTECombatTools` 的工作区，最重要的现成能力是 `anomaly.nte.combat` v1：它提供当前角色战斗快照、单调序列的角色伤害事件、按参与者/来源/方向聚合的统计，以及来源和参与者名称解析；仓库还附有完整的 `nte_combat_demo` 消费示例。[来源：NTE 服务 API](https://github.com/AnomalyNTE/Anomaly/blob/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/docs/api-reference/nte-services.md#anomalyntecombat) · [示例源码](https://github.com/AnomalyNTE/Anomaly/blob/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/examples/nte_combat_demo/plugin.cpp) · [示例 Manifest](https://github.com/AnomalyNTE/Anomaly/blob/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/examples/nte_combat_demo/manifest.json)
+对当前名为 `NTE Combat Tracker` 的项目，最重要的现成能力是 `anomaly.nte.combat` v1：它提供当前角色战斗快照、单调序列的角色伤害事件、按参与者/来源/方向聚合的统计，以及来源和参与者名称解析；仓库还附有完整的 `nte_combat_demo` 消费示例。[来源：NTE 服务 API](https://github.com/AnomalyNTE/Anomaly/blob/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/docs/api-reference/nte-services.md#anomalyntecombat) · [示例源码](https://github.com/AnomalyNTE/Anomaly/blob/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/examples/nte_combat_demo/plugin.cpp) · [示例 Manifest](https://github.com/AnomalyNTE/Anomaly/blob/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/examples/nte_combat_demo/manifest.json)
 
-因此，若 `NTECombatTools` 计划做外部 Python 分析/UI，较合理的集成方式不是重新扫描游戏内存，而是编写一个很薄的 Anomaly 原生插件：在 Game 域读取 `anomaly.nte.combat`，规范化后通过 Anomaly 的本地 WebSocket 服务广播 JSON，Python 端只连接 `ws://127.0.0.1:14514`。这是基于现有 ABI 能力做出的架构建议，不是仓库已经提供的战斗 WebSocket 协议；WebSocket 服务只提供无语义的文本广播，协议仍需本项目自行定义。[来源：WebSocket API](https://github.com/AnomalyNTE/Anomaly/blob/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/docs/api-reference/websocket.md) · [战斗消费线程规则](https://github.com/AnomalyNTE/Anomaly/blob/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/docs/api-reference/nte-services.md#anomalyntecombat)
+因此，若 `NTE Combat Tracker` 计划做外部 Python 分析/UI，较合理的集成方式不是重新扫描游戏内存，而是编写一个很薄的 Anomaly 原生插件：在 Game 域读取 `anomaly.nte.combat`，规范化后通过 Anomaly 的本地 WebSocket 服务广播 JSON，Python 端只连接 `ws://127.0.0.1:14514`。这是基于现有 ABI 能力做出的架构建议，不是仓库已经提供的战斗 WebSocket 协议；WebSocket 服务只提供无语义的文本广播，协议仍需本项目自行定义。[来源：WebSocket API](https://github.com/AnomalyNTE/Anomaly/blob/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/docs/api-reference/websocket.md) · [战斗消费线程规则](https://github.com/AnomalyNTE/Anomaly/blob/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/docs/api-reference/nte-services.md#anomalyntecombat)
 
 ## 1. 项目定位与边界
 
@@ -154,11 +154,11 @@ cmake --install .build\windows-vs2022 --config RelWithDebInfo `
 
 综合判断：**工程设计成熟度中等偏高，生态与运行验证成熟度仍早期**。换言之，代码组织、ABI、安全降级和发布供应链已有较系统的设计，但项目时间短、维护集中、与游戏版本强耦合，且 CI 尚未把独立验证程序变成自动门禁。适合用作实验性/研究型底座，不应在缺少版本锁定、降级路径和数据校验的情况下当作稳定生产依赖。
 
-## 8. 与当前 `NTECombatTools` 工作区的关系
+## 8. 与当前 `NTE Combat Tracker` 项目的关系
 
 ### 本地只读检查结果
 
-调研开始时 `C:\Project\PythonProject\NTECombatTools` 是空目录，且不是 Git 仓库：未发现 `README`、`pyproject.toml`、`requirements*.txt`、`package.json`、源码、docs/notes 约定或任何可用于比对的实现。因此，目前只能依据工作区名称推断目标可能与 NTE 战斗采集/分析有关，不能声称已有代码与 Anomaly 兼容，也不能判断具体 Python 框架或数据模型。本报告因无既有约定，按任务约定写入 `docs/research/anomaly-project-analysis.md`。
+调研开始时该项目目录是空目录，且不是 Git 仓库：未发现 `README`、`pyproject.toml`、`requirements*.txt`、`package.json`、源码、docs/notes 约定或任何可用于比对的实现。因此，目前只能依据工作区名称推断目标可能与 NTE 战斗采集/分析有关，不能声称已有代码与 Anomaly 兼容，也不能判断具体 Python 框架或数据模型。本报告因无既有约定，按任务约定写入 `docs/research/anomaly-project-analysis.md`。
 
 ### 可复用的最小能力面
 
@@ -183,7 +183,7 @@ flowchart LR
     A --> C[anomaly.nte.combat v1]
     C --> B[自研 Anomaly Bridge Plugin]
     W[anomaly.websocket v1] --> B
-    B -->|loopback JSON text frames| P[Python NTECombatTools]
+    B -->|loopback JSON text frames| P[Python NTE Combat Tracker]
     P --> S[(本地会话/统计存储)]
     P --> U[桌面或 Web UI]
 ```
@@ -202,7 +202,7 @@ flowchart LR
 
 ## 9. 建议的下一步（不属于本次调研实施范围）
 
-1. 先定义 `NTECombatTools` 自己的只读事件协议，例如 `schemaVersion`、`sessionId`、`runtimeVersion`、`worldGeneration`、`sequence`、`attacker`、`victim`、`source`、`finalDamage`、`qualityFlags`。
+1. 先定义 `NTE Combat Tracker` 自己的只读事件协议，例如 `schemaVersion`、`sessionId`、`runtimeVersion`、`worldGeneration`、`sequence`、`attacker`、`victim`、`source`、`finalDamage`、`qualityFlags`。
 2. 以 `examples/nte_combat_demo` 为消费逻辑基线、以插件模板为工程基线，实现最小 bridge；不要复制 Runtime 内部头文件或直接读取游戏内存。[来源：战斗示例](https://github.com/AnomalyNTE/Anomaly/tree/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/examples/nte_combat_demo) · [官方插件模板](https://github.com/AnomalyNTE/Anomaly-Plugin-Template)
 3. Python 端先做断线重连、重复序列去重、cursor gap/`PARTIAL` 可视化和原始事件落盘，再做 DPS 等派生指标。
 4. 固定依赖到明确的 Anomaly Release/SDK，不跟随 `main` 内部实现；升级时先跑无游戏 test host/ABI 检查，再安排自有测试环境的真实 NTE smoke。[来源：构建与工具文档](https://github.com/AnomalyNTE/Anomaly/blob/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/docs/developer-guide/building.md) · [SDK ABI 基线](https://github.com/AnomalyNTE/Anomaly/tree/0e1b59c02914e943a45885b40ee78ea1dcf8bd1e/abi)

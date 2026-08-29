@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(NteCombatStatsPlugin VERSION 0.4.0 LANGUAGES CXX)
+project(NteCombatTracker VERSION 0.4.0 LANGUAGES CXX)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "NTE Combat Stats targets Windows x64")
+    message(FATAL_ERROR "NTE Combat Tracker targets Windows x64")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -53,17 +53,17 @@ if(MSVC)
     target_compile_options(nte_overlay_model PRIVATE /W4 /permissive- /EHsc /utf-8)
 endif()
 
-add_executable(NteCombatOverlay WIN32 src/overlay_app.cpp)
-target_link_libraries(NteCombatOverlay PRIVATE
+add_executable(NteCombatTracker WIN32 src/overlay_app.cpp)
+target_link_libraries(NteCombatTracker PRIVATE
     nte_overlay_model
     d2d1 dwrite windowscodecs winhttp shell32 ole32 user32 gdi32)
-target_compile_definitions(NteCombatOverlay PRIVATE
+target_compile_definitions(NteCombatTracker PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-set_target_properties(NteCombatOverlay PROPERTIES
+set_target_properties(NteCombatTracker PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/overlay")
 if(MSVC)
-    target_compile_options(NteCombatOverlay PRIVATE /W4 /permissive- /EHsc /utf-8)
-    target_link_options(NteCombatOverlay PRIVATE /INCREMENTAL:NO)
+    target_compile_options(NteCombatTracker PRIVATE /W4 /permissive- /EHsc /utf-8)
+    target_link_options(NteCombatTracker PRIVATE /INCREMENTAL:NO)
 endif()
 
 include(CTest)
@@ -125,12 +125,12 @@ endif()
 option(NTE_COMBAT_STATS_BUILD_PLUGIN "Build the Anomaly plugin package" ON)
 if(NTE_COMBAT_STATS_BUILD_PLUGIN)
     find_package(AnomalySDK 1.7.0 EXACT CONFIG REQUIRED)
-    set(NTE_COMBAT_STATS_PACKAGE_DIR "${CMAKE_BINARY_DIR}/package/NteCombatStats")
-    set(NTE_COMBAT_STATS_BUILD_DIR "${CMAKE_BINARY_DIR}/artifacts/NteCombatStats")
+    set(NTE_COMBAT_STATS_PACKAGE_DIR "${CMAKE_BINARY_DIR}/package/NteCombatTracker")
+    set(NTE_COMBAT_STATS_BUILD_DIR "${CMAKE_BINARY_DIR}/artifacts/NteCombatTracker")
     anomaly_add_plugin(nte_combat_stats
         SOURCES src/plugin.cpp
         MANIFEST manifest.json
-        PACKAGE_NAME NteCombatStats
+        PACKAGE_NAME NteCombatTracker
         OUTPUT_DIRECTORY "${NTE_COMBAT_STATS_BUILD_DIR}")
     target_link_libraries(nte_combat_stats PRIVATE nte_overlay_model)
     set_target_properties(nte_combat_stats PROPERTIES
@@ -152,8 +152,8 @@ if(NTE_COMBAT_STATS_BUILD_PLUGIN)
         endif()
         if(package_file STREQUAL "plugin.dll")
             set(package_source "$<TARGET_FILE:nte_combat_stats>")
-        elseif(package_file STREQUAL "NteCombatOverlay.exe")
-            set(package_source "$<TARGET_FILE:NteCombatOverlay>")
+        elseif(package_file STREQUAL "NteCombatTracker.exe")
+            set(package_source "$<TARGET_FILE:NteCombatTracker>")
         else()
             set(package_source "${CMAKE_CURRENT_SOURCE_DIR}/${package_file}")
         endif()
@@ -188,7 +188,7 @@ if(NTE_COMBAT_STATS_BUILD_PLUGIN)
     endforeach()
     add_custom_target(nte_combat_stats_package
         ${NTE_COMBAT_STATS_PACKAGE_COMMANDS}
-        DEPENDS nte_combat_stats NteCombatOverlay
-        COMMENT "Assembling NTE Combat Stats plugin package"
+        DEPENDS nte_combat_stats NteCombatTracker
+        COMMENT "Assembling NTE Combat Tracker plugin package"
         VERBATIM)
 endif()

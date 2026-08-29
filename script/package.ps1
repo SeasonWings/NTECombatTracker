@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $buildDirectory = Join-Path $repositoryRoot 'build'
 $distributionDirectory = Join-Path $repositoryRoot 'dist'
-$packageDirectory = Join-Path $buildDirectory 'package\NteCombatStats'
+$packageDirectory = Join-Path $buildDirectory 'package\NteCombatTracker'
 $packagingWorkDirectory = Join-Path $buildDirectory 'packaging'
 
 function Resolve-Executable {
@@ -308,7 +308,7 @@ $manifest = Get-Content -LiteralPath (Join-Path $packageDirectory 'manifest.json
 if ([string]::IsNullOrWhiteSpace($manifest.version)) {
     throw 'manifest.json does not contain a valid version.'
 }
-$archiveName = "NteCombatStats-$($manifest.version)-Release.zip"
+$archiveName = "NteCombatTracker-$($manifest.version)-Release.zip"
 $temporaryArchive = Join-Path $packagingWorkDirectory $archiveName
 $finalArchive = Join-Path $distributionDirectory $archiveName
 

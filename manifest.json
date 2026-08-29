@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "id": "local.nte.combat-stats",
-  "name": "NTE Combat Stats",
+  "name": "NTE Combat Tracker",
   "description": "只读的实时伤害统计与高保真本地 JSONL 战斗日志。",
   "author": "Shikari",
   "license": "AGPL-3.0-only",

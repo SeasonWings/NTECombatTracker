@@ -52,8 +52,8 @@ using nte::combat_stats::overlay::ScaleWindowExtent;
 using nte::combat_stats::overlay::UnscaleWindowExtent;
 using namespace std::chrono_literals;
 
-constexpr wchar_t kWindowClass[] = L"NteCombatOverlay.Window.v1";
-constexpr wchar_t kWindowTitle[] = L"NTE Combat Overlay";
+constexpr wchar_t kWindowClass[] = L"NteCombatTracker.Window.v1";
+constexpr wchar_t kWindowTitle[] = L"NTE Combat Tracker";
 constexpr wchar_t kMutexName[] = L"Local\\NteCombatOverlay.local.nte.combat-stats";
 constexpr UINT kSnapshotMessage = WM_APP + 1;
 constexpr UINT kTrayMessage = WM_APP + 2;
@@ -1066,7 +1066,7 @@ struct HttpHandle {
 void ReceiveSnapshots(const std::stop_token stop) {
     while (!stop.stop_requested()) {
         SetConnectionStatus("正在连接 Runtime…", false);
-        HttpHandle session(WinHttpOpen(L"NteCombatOverlay/0.4.0",
+        HttpHandle session(WinHttpOpen(L"NteCombatTracker/0.4.0",
             WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
             WINHTTP_NO_PROXY_BYPASS, 0));
         if (session.value) WinHttpSetTimeouts(session.value, 1000, 1000, 1000, 1000);

@@ -1,4 +1,4 @@
-NTE Combat Stats - Third-Party Notices
+NTE Combat Tracker - Third-Party Notices
 ======================================
 
 nlohmann/json 3.11.3

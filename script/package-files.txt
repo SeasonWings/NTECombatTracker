@@ -1,5 +1,5 @@
 manifest.json
-NteCombatOverlay.exe
+NteCombatTracker.exe
 plugin.dll
 THIRD_PARTY_NOTICES.txt
 locales/zh-CN.json
