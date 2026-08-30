@@ -1,0 +1,9 @@
+#pragma once
+
+namespace nte::build {
+
+inline constexpr char kPluginVersion[] = "@NTE_PLUGIN_VERSION@";
+inline constexpr wchar_t kOverlayUserAgent[] =
+    L"NteCombatTracker/@NTE_PLUGIN_VERSION@";
+
+}  // namespace nte::build

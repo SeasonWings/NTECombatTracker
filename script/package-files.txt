@@ -1,5 +1,6 @@
 manifest.json
 NteCombatTracker.exe
 plugin.dll
+LICENSE
 THIRD_PARTY_NOTICES.txt
 locales/zh-CN.json

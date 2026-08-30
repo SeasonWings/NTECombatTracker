@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.22)
 
 project(NteCombatTracker VERSION 0.4.0 LANGUAGES CXX)
 
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/manifest.json" NTE_PLUGIN_MANIFEST_JSON)
+string(JSON NTE_PLUGIN_VERSION GET "${NTE_PLUGIN_MANIFEST_JSON}" version)
+configure_file(
+    cmake/plugin_version.hpp.in
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/include/plugin_version.hpp"
+    @ONLY)
+
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "NTE Combat Tracker targets Windows x64")
 endif()
@@ -28,7 +35,9 @@ add_library(nte_combat_stats_engine STATIC
     src/damage_log.cpp
     src/event_damage_source_resolver.cpp
     src/log_worker.cpp)
-target_include_directories(nte_combat_stats_engine PUBLIC include)
+target_include_directories(nte_combat_stats_engine PUBLIC
+    include
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/include")
 target_compile_definitions(nte_combat_stats_engine PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(nte_combat_stats_engine PUBLIC

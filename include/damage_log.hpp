@@ -1,6 +1,7 @@
 #pragma once
 
 #include "combat_stats_engine.hpp"
+#include "plugin_version.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -20,7 +21,7 @@ struct ReportOpen {
     combat_stats::Handle world;
     std::int64_t started_utc_ms{};
     std::string game_build;
-    std::string plugin_version{"0.4.0"};
+    std::string plugin_version{nte::build::kPluginVersion};
     std::string runtime_version;
 };
 

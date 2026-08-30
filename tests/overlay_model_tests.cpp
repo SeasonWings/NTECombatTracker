@@ -156,7 +156,9 @@ void LiveAndHistoricalRowsResolveTheSameAttributeColor() {
     const auto live_color = ResolvePlayerDisplayColor(live, resolver, colors);
     const auto historical_color = ResolvePlayerDisplayColor(
         historical, resolver, colors);
-    Check(live_color == 0x699A87U && historical_color == live_color,
+    const auto expected = colors.Find("光");
+    Check(expected.has_value() && live_color == *expected &&
+              historical_color == live_color,
         "live and historical rows for one character should share its attribute color");
 }
 

@@ -1,6 +1,25 @@
 # NTE Combat Tracker
 
-Anomaly v1.7.0 的只读游戏内战斗统计、本地日志和纯 Win32 Overlay 插件。它消费 `anomaly.nte.combat`，显示当前玩家队伍轮换期间的输出、承伤、遭遇 DPS、10 秒 DPS、伤害来源、参与者和最近事件，并将遭遇内宿主可见的完整伤害事件保存为可重放 JSON Lines。
+面向 Anomaly 1.7.x（使用 v1.7.0 SDK 构建）的只读游戏内战斗统计、本地日志和纯 Win32 Overlay 插件。它消费 `anomaly.nte.combat`，显示当前玩家队伍轮换期间的输出、承伤、遭遇 DPS、10 秒 DPS、伤害来源、参与者和最近事件，并将遭遇内宿主可见的完整伤害事件保存为可重放 JSON Lines。
+
+## 安装与更新
+
+当前公开版本为 `0.4.0-alpha.1`，需要 Windows x64、NTE 和提供 Plugin API 1 的 Anomaly 1.7.x Runtime。
+
+1. 在游戏中按 `Insert` 打开 Anomaly，进入 **Plugins > 第三方插件**。
+2. 开启第三方插件功能，添加以下插件源地址并应用：
+
+   ```text
+   https://raw.githubusercontent.com/SeasonWings/anomaly-plugins/main/pluginmaster.json
+   ```
+
+3. 回到 **Plugins > 可用** 并刷新，安装 **NTE Combat Tracker**。
+4. 在 **已安装** 中检查 Manifest 权限后手动启用。后续版本会出现在 **Plugins > 更新**。
+
+源码、问题反馈和版本说明位于 [SeasonWings/NTECombatTracker](https://github.com/SeasonWings/NTECombatTracker)。这个 GitHub 项目主页不能替代上面的 `pluginmaster.json` 插件源地址。
+
+> [!WARNING]
+> 这是 Alpha 软件。插件和 Overlay 均为原生程序，插件 DLL 会加载到游戏进程中；第三方插件源和发布包目前没有发布者签名。使用前请理解崩溃、数据泄露、游戏更新失效和账号处罚风险，并只在自有测试环境中使用。
 
 ## 构建
 
@@ -28,7 +47,11 @@ Anomaly v1.7.0 的只读游戏内战斗统计、本地日志和纯 Win32 Overlay
 │   ├── icons/
 │   ├── images/
 │   └── languages/
+├── dict/
+│   └── attribute_colors.json
+├── LICENSE
 ├── NteCombatTracker.exe
+├── package.sha256
 ├── THIRD_PARTY_NOTICES.txt
 ├── manifest.json
 └── plugin.dll

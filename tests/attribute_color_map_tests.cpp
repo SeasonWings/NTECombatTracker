@@ -22,12 +22,12 @@ void RepositoryDictionaryProvidesAllAttributeColors() {
         error);
 
     Check(error.empty(), "the checked-in attribute color dictionary should load");
-    Check(colors.Find("灵") == 0x2F9F89U, "灵 should use its teal representative color");
-    Check(colors.Find("相") == 0xB67817U, "相 should use its gold representative color");
-    Check(colors.Find("暗") == 0x625DAFU, "暗 should use its violet representative color");
-    Check(colors.Find("光") == 0x699A87U, "光 should use its mint representative color");
-    Check(colors.Find("魂") == 0x326FBFU, "魂 should use its blue representative color");
-    Check(colors.Find("咒") == 0xB61E3AU, "咒 should use its crimson representative color");
+    Check(colors.Find("灵") == 0x3EBDA1U, "灵 should use its teal representative color");
+    Check(colors.Find("相") == 0xCBBD39U, "相 should use its gold representative color");
+    Check(colors.Find("暗") == 0x5E58BDU, "暗 should use its violet representative color");
+    Check(colors.Find("光") == 0xBCBCBCU, "光 should use its silver representative color");
+    Check(colors.Find("魂") == 0x3E98C5U, "魂 should use its blue representative color");
+    Check(colors.Find("咒") == 0xD0455EU, "咒 should use its crimson representative color");
     Check(!colors.Find("未知").has_value(),
         "an unknown attribute should not invent a representative color");
 }

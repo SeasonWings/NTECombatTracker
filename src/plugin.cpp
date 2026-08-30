@@ -7,6 +7,7 @@
 #include "overlay_publish_policy.hpp"
 #include "overlay_protocol.hpp"
 #include "overlay_control.hpp"
+#include "plugin_version.hpp"
 
 #include <anomaly/sdk/anomaly_sdk.h>
 #include <anomaly/sdk/cpp.hpp>
@@ -316,7 +317,7 @@ bool OpenEncounterLog(
         EnsureNameResources();
         if (!g_context.log_worker->Submit(nte::damage_log::ReportOpen{
                 session.report_id, world, utc_ms, game_build,
-                "0.4.0", ResolveRuntimeVersion(host)})) return false;
+                nte::build::kPluginVersion, ResolveRuntimeVersion(host)})) return false;
     }
     session.encounter_id = nte::damage_log::GenerateUuidV4();
     if (session.encounter_id.empty()) return false;
@@ -1416,7 +1417,7 @@ ANOMALY_SDK_EXPORT AnomalyStatusV1 ANOMALY_CALL AnomalyPluginEntryV1(
         anomaly::sdk::StringView("local.nte.combat-stats"),
         anomaly::sdk::StringView("NTE Combat Tracker"),
         anomaly::sdk::StringView("Shikari"),
-        anomaly::sdk::StringView("0.4.0"),
+        anomaly::sdk::StringView(nte::build::kPluginVersion),
         Load, Start, Stop, Unload, Update, Draw};
     return anomaly::sdk::Ok();
 }

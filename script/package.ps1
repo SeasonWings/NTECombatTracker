@@ -92,6 +92,25 @@ function Reset-BuildDirectory {
     New-Item -ItemType Directory -Path $actual -Force | Out-Null
 }
 
+function Get-RelativeFileList {
+    param(
+        [Parameter(Mandatory)] [string]$Root,
+        [Parameter(Mandatory)] [string]$OutsideRootMessage
+    )
+
+    $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+    return Get-ChildItem -LiteralPath $Root -File -Recurse |
+        ForEach-Object {
+            $fullPath = [System.IO.Path]::GetFullPath($_.FullName)
+            if (-not $fullPath.StartsWith(
+                    $rootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "$OutsideRootMessage`: $fullPath"
+            }
+            $fullPath.Substring($rootPath.Length).Replace('\', '/')
+        } |
+        Sort-Object
+}
+
 function Read-StrictJson {
     param([Parameter(Mandatory)] [string]$Path)
     $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
@@ -299,17 +318,8 @@ foreach ($relativeDirectory in (Get-Content -LiteralPath $packageDirectoryList |
             $fullPath.Substring($sourceRoot.Length).Replace('\', '/')
         }
 }
-$packageRoot = [System.IO.Path]::GetFullPath($packageDirectory).TrimEnd('\') + '\'
-$actualFiles = Get-ChildItem -LiteralPath $packageDirectory -File -Recurse |
-    ForEach-Object {
-        $fullPath = [System.IO.Path]::GetFullPath($_.FullName)
-        if (-not $fullPath.StartsWith(
-                $packageRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw "Package file is outside the staging directory: $fullPath"
-        }
-        $fullPath.Substring($packageRoot.Length).Replace('\', '/')
-    } |
-    Sort-Object
+$actualFiles = Get-RelativeFileList -Root $packageDirectory `
+    -OutsideRootMessage 'Package file is outside the staging directory'
 $expectedSorted = $expectedFiles | Sort-Object
 if ([string]::Join("`n", $actualFiles) -ne [string]::Join("`n", $expectedSorted)) {
     throw "Package contents differ from package-files.txt. Actual files:`n$($actualFiles -join "`n")"
@@ -317,9 +327,11 @@ if ([string]::Join("`n", $actualFiles) -ne [string]::Join("`n", $expectedSorted)
 Test-NameResources -Root (Join-Path $packageDirectory 'res')
 Test-AttributeColorDictionary -Root $packageDirectory
 
+$anomalyPluginTool = Resolve-Executable -Name 'anomaly-plugin' `
+    -ExplicitPath $AnomalyPluginTool
 if (-not $SkipValidation) {
-    $validator = Resolve-Executable -Name 'anomaly-plugin' -ExplicitPath $AnomalyPluginTool
-    Invoke-NativeCommand -FilePath $validator -Arguments @('validate', $packageDirectory)
+    Invoke-NativeCommand -FilePath $anomalyPluginTool `
+        -Arguments @('validate', $packageDirectory)
 }
 
 $manifest = Get-Content -LiteralPath (Join-Path $packageDirectory 'manifest.json') `
@@ -328,18 +340,38 @@ $manifest = Get-Content -LiteralPath (Join-Path $packageDirectory 'manifest.json
 if ([string]::IsNullOrWhiteSpace($manifest.version)) {
     throw 'manifest.json does not contain a valid version.'
 }
+Invoke-NativeCommand -FilePath $anomalyPluginTool -Arguments @(
+    'pack', $packageDirectory, '--output', $packagingWorkDirectory
+)
+$packedPackageDirectory = Join-Path $packagingWorkDirectory $manifest.id
+if (-not (Test-Path -LiteralPath $packedPackageDirectory -PathType Container)) {
+    throw "Packed plugin directory is unavailable: $packedPackageDirectory"
+}
+$actualPackedFiles = Get-RelativeFileList -Root $packedPackageDirectory `
+    -OutsideRootMessage 'Packed file is outside the packed plugin directory'
+$expectedPackedFiles = @($expectedFiles + 'package.sha256') | Sort-Object
+if ([string]::Join("`n", $actualPackedFiles) -ne
+    [string]::Join("`n", $expectedPackedFiles)) {
+    throw "Packed contents differ from the expected release files. Actual files:`n$($actualPackedFiles -join "`n")"
+}
 $archiveName = "NteCombatTracker-$($manifest.version)-Release.zip"
 $temporaryArchive = Join-Path $packagingWorkDirectory $archiveName
 $finalArchive = Join-Path $distributionDirectory $archiveName
 
 $archiveArguments = @(
     '-E', 'tar', 'cf', $temporaryArchive, '--format=zip'
-) + $expectedFiles
-Invoke-NativeCommand -FilePath $cmake -WorkingDirectory $packageDirectory `
+) + $expectedPackedFiles
+Invoke-NativeCommand -FilePath $cmake -WorkingDirectory $packedPackageDirectory `
     -Arguments $archiveArguments
 
 New-Item -ItemType Directory -Path $distributionDirectory -Force | Out-Null
 Move-Item -LiteralPath $temporaryArchive -Destination $finalArchive -Force
 
 $result = Get-Item -LiteralPath $finalArchive
+$archiveHash = (Get-FileHash -LiteralPath $result.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+$checksumPath = "$($result.FullName).sha256"
+$checksumText = "$archiveHash  $($result.Name)`n"
+[System.IO.File]::WriteAllText(
+    $checksumPath, $checksumText, [System.Text.UTF8Encoding]::new($false))
 Write-Host "Package created: $($result.FullName) ($($result.Length) bytes)"
+Write-Host "Checksum created: $checksumPath"

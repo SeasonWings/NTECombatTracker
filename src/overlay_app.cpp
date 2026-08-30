@@ -5,6 +5,7 @@
 #include "overlay_protocol.hpp"
 #include "history_reader.hpp"
 #include "log_worker.hpp"
+#include "plugin_version.hpp"
 #include "resource_name_resolver.hpp"
 
 #include <windows.h>
@@ -1001,7 +1002,7 @@ struct HttpHandle {
 void ReceiveSnapshots(const std::stop_token stop) {
     while (!stop.stop_requested()) {
         SetConnectionStatus("正在连接 Runtime…", false);
-        HttpHandle session(WinHttpOpen(L"NteCombatTracker/0.4.0",
+        HttpHandle session(WinHttpOpen(nte::build::kOverlayUserAgent,
             WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
             WINHTTP_NO_PROXY_BYPASS, 0));
         if (session.value) WinHttpSetTimeouts(session.value, 1000, 1000, 1000, 1000);
